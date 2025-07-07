@@ -1,0 +1,17 @@
+# Requirements for HarmBench content filtering sandbagging detection
+
+# Core dependencies
+inspect-ai>=0.3.0
+datasets>=2.14.0  # For loading HarmBench from HuggingFace
+huggingface-hub>=0.16.0
+
+# Optional but recommended
+pandas>=2.0.0  # For data manipulation
+numpy>=1.24.0  # For numerical operations
+tqdm>=4.65.0  # For progress bars
+
+# Development dependencies (optional)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
