@@ -205,17 +205,16 @@ def create_conversation_samples(dataset: List[Dict[str, Any]]) -> List[Sample]:
             role = turn.get("role", "unknown")
             content = turn.get("content", "")
             
-            # Format with [H] and [A] prefixes as specified
+            # Format with User: and Assistant: prefixes like base transcript
             if role.lower() == "user":
-                escaped_transcript += f"[H] {content}\n"
+                escaped_transcript += f"User: {content}\n"
             elif role.lower() == "assistant":
-                escaped_transcript += f"[A] {content}\n"
+                escaped_transcript += f"Assistant: {content}\n"
             # Skip system messages for this format
         
         # Create the prompt with the specified format
         prompt = f"""The following is a transcript from an interaction between the human and the assistant. Please carefully read over the transcript.
 
-In this transcript, the human's turns are preceded by [H] and the assistant's turns are preceded by [A].
 <transcript>
 {escaped_transcript}
 </transcript>

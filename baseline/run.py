@@ -2,6 +2,9 @@
 """
 Convenience script to run the baseline lie detection evaluation.
 The actual implementation is in baseline/evaluate.py
+
+
+
 """
 
 import sys
@@ -18,7 +21,7 @@ S3_URI = "s3://dipika-lie-detection-data/processed-data-v4-copy/"  # Set to None
 PROCESSED_DATA_DIR = "/Users/dipikakhullar/Desktop/lie-detector/baseline/training_data_july8"  # Directory containing the processed evaluation data
 
 BASELINE_TYPES = ["base_transcript", "escaped_transcript", "llama_chat"]  # List of all baselines to run
-
+# BASELINE_TYPES = ["escaped_transcript"]
 # Evaluation mode - set to True to split results by model, False for combined results
 SPLIT_BY_MODEL = True
 
