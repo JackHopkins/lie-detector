@@ -4,6 +4,7 @@ import os
 import subprocess
 from typing import Optional, Tuple
 from datetime import datetime, timezone
+from typing import Optional
 
 def parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
     """
@@ -395,3 +396,32 @@ def clean_s3_processed_data(bucket: str = "dipika-lie-detection-data", prefix: s
         print("To actually delete files, call with dry_run=False")
     else:
         print("\nCleanup complete!")
+
+def copy_s3_folder_to_local(s3_folder_url: str, local_dir: str):
+    """
+    Copy all files from an S3 folder (s3://bucket/prefix/) to a local directory, preserving subdirectory structure.
+    Args:
+        s3_folder_url: S3 folder URL (e.g., s3://bucket/prefix/)
+        local_dir: Local directory to copy files into
+    """
+    import re
+    s3_pattern = r"s3://([^/]+)/(.+)"
+    m = re.match(s3_pattern, s3_folder_url.rstrip('/'))
+    if not m:
+        raise ValueError(f"Invalid S3 folder URL: {s3_folder_url}")
+    bucket, prefix = m.group(1), m.group(2)
+    s3_client = boto3.client('s3')
+    paginator = s3_client.get_paginator('list_objects_v2')
+    print(f"Listing objects in s3://{bucket}/{prefix}/ ...")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            # Only copy files, not folders
+            if key.endswith('/'):
+                continue
+            rel_path = os.path.relpath(key, prefix)
+            local_path = os.path.join(local_dir, rel_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            print(f"Downloading s3://{bucket}/{key} -> {local_path}")
+            s3_client.download_file(bucket, key, local_path)
+    print(f"All files copied from s3://{bucket}/{prefix}/ to {local_dir}")

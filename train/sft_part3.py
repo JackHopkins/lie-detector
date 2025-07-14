@@ -3,16 +3,53 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.trainer import Trainer
 from transformers.training_args import TrainingArguments
 from transformers.trainer_callback import TrainerCallback
+from transformers.data.data_collator import DataCollatorForSeq2Seq
 from datasets import Dataset
 import numpy as np
 import logging
 import json
 from peft import LoraConfig, get_peft_model, TaskType
-from transformers import DataCollatorForSeq2Seq
 from evaluate import ComprehensiveAccuracyCallback, comprehensive_evaluation, predict_a_b, save_comprehensive_results, UnifiedEvaluationCallback
 import wandb
 import sys
 import random
+import os
+from datetime import datetime
+
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# S3 copy before any data processing
+from common.utils import copy_s3_folder_to_local  # Assuming this exists, otherwise define below
+from train.preprocess_training_data import process_training_data
+
+# Determine destination folder with timestamp
+now_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+run_dir = f"run_{now_str}"
+local_data_dir = f"{run_dir}/training_data"
+model_output_dir = f"{run_dir}/model_outputs"
+
+# Create the unified run directory
+os.makedirs(run_dir, exist_ok=True)
+os.makedirs(local_data_dir, exist_ok=True)
+os.makedirs(model_output_dir, exist_ok=True)
+
+print(f"📁 Created unified run directory: {run_dir}")
+print(f"   ├── {local_data_dir} (training data)")
+print(f"   └── {model_output_dir} (model outputs)")
+
+s3_source = "s3://dipika-lie-detection-data/processed-data-v4-copy/"
+
+# Copy S3 folder to local
+print(f"Copying data from {s3_source} to {local_data_dir} ...")
+copy_s3_folder_to_local(s3_source, local_data_dir)
+print(f"S3 copy complete. Data available in {local_data_dir}")
+
+# Preprocess the copied data to create merged training file
+print(f"Preprocessing training data...")
+output_file = f"{run_dir}/training_data.jsonl"
+process_training_data(local_data_dir, output_file)
+print(f"Preprocessing complete. Merged file: {output_file}")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,13 +64,17 @@ sweep_config = {
     },
     'parameters': {
         'learning_rate': {
-            'values': [2e-4,1e-5, 5e-5, 1e-4, 2e-4, 5e-4]
+            'values': [1e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3]
         },
         'lora_r': {
-            'values': [8, 16, 32, 64]
+            'values': [4, 8, 16, 32, 64, 128, 256]
         },
         'lora_alpha': {
-            'values': [16, 32, 64, 128]
+            'values': [8, 16, 32, 64, 128, 256]
+        },
+        'lora_dropout': {
+            'min': 0.0,
+            'max': 0.3
         },
         'per_device_batch_size': {
             'values': [4, 8, 16, 32]
@@ -44,12 +85,22 @@ sweep_config = {
         'lora_dropout': {
             'min': 0.0,
             'max': 0.3
+        },
+        'weight_decay': {
+            'min': 0.0,
+            'max': 0.1
+        },
+        'warmup_ratio': {
+            'min': 0.0,
+            'max': 0.2
         }
     }
 }
 
 def prepare_lie_detection_dataset(data, tokenizer, max_length=512):
     examples = []
+    total_examples = len(data)
+    filtered_examples = 0
     
     for item in data:
         prompt = item["prompt"]
@@ -71,6 +122,7 @@ def prepare_lie_detection_dataset(data, tokenizer, max_length=512):
         )["input_ids"]
         
         if len(completion_tokens) != 1:
+            filtered_examples += 1
             continue
             
         input_ids = prompt_tokens + completion_tokens
@@ -80,6 +132,12 @@ def prepare_lie_detection_dataset(data, tokenizer, max_length=512):
             "input_ids": input_ids,
             "labels": labels
         })
+    
+    print(f"📊 Dataset preparation stats:")
+    print(f"   Total examples: {total_examples}")
+    print(f"   Filtered out: {filtered_examples} (completion != 1 token)")
+    print(f"   Final examples: {len(examples)}")
+    print(f"   Filter rate: {filtered_examples/total_examples:.1%}")
     
     return examples
 
@@ -95,14 +153,19 @@ def train_with_config(config=None):
     learning_rate = getattr(config, 'learning_rate', 1e-5)
     lora_r = getattr(config, 'lora_r', 16)
     lora_alpha = getattr(config, 'lora_alpha', 32)
+    lora_dropout = getattr(config, 'lora_dropout', 0.1)
     per_device_batch_size = getattr(config, 'per_device_batch_size', 8)
+    gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 2)
     num_epochs = getattr(config, 'num_epochs', 3)
     lora_dropout = getattr(config, 'lora_dropout', 0.1)
+    weight_decay = getattr(config, 'weight_decay', 0.0)
+    warmup_ratio = getattr(config, 'warmup_ratio', 0.0)
     
     print(f"🔧 Hyperparameters:")
     print(f"   Learning Rate: {learning_rate}")
     print(f"   LoRA r: {lora_r}, alpha: {lora_alpha}, dropout: {lora_dropout}")
     print(f"   Batch size: {per_device_batch_size}, Epochs: {num_epochs}")
+    print(f"   Weight decay: {weight_decay}, Warmup ratio: {warmup_ratio}")
     
     # Load model
     model_name = "meta-llama/Meta-Llama-3-8B"
@@ -140,7 +203,7 @@ def train_with_config(config=None):
     # Load data
     print("Loading dataset...")
     data = []
-    with open("/root/lie-detector/training_data_july8.jsonl", 'r') as f:
+    with open(output_file, 'r') as f:
         for line in f:
             if line.strip():
                 data.append(json.loads(line))
@@ -163,6 +226,11 @@ def train_with_config(config=None):
     train_data = data[:train_size]
     eval_data = data[train_size:]
 
+    print(f"📊 Data split:")
+    print(f"   Train examples: {len(train_data)}")
+    print(f"   Eval examples: {len(eval_data)}")
+    print(f"   Split ratio: {len(train_data)}/{len(eval_data)} ({len(train_data)/len(data):.1%}/{len(eval_data)/len(data):.1%})")
+
     # Prepare datasets
     train_examples = prepare_lie_detection_dataset(train_data, tokenizer)
     eval_examples = prepare_lie_detection_dataset(eval_data, tokenizer)
@@ -181,8 +249,9 @@ def train_with_config(config=None):
 
 
     #Training arguments with sweep parameters
+    run_name = wandb.run.name if wandb.run else f"run-{now_str}"
     training_args = TrainingArguments(
-        output_dir=f"./outputs-sweep-{wandb.run.name}",
+        output_dir=f"{model_output_dir}/sweep-{run_name}",
         per_device_train_batch_size=per_device_batch_size,  # ✅ From sweep
         per_device_eval_batch_size=4,
         gradient_accumulation_steps=2,
@@ -202,6 +271,8 @@ def train_with_config(config=None):
         dataloader_pin_memory=False,
         dataloader_num_workers=0,
         remove_unused_columns=False,
+        weight_decay=weight_decay,
+        warmup_ratio=warmup_ratio,
     )
 
     # Get token IDs
@@ -282,9 +353,29 @@ def train_with_config(config=None):
         config=config,
         val_metrics=val_metrics,
         train_metrics=train_metrics,
-        run_name=wandb.run.name,
+        run_name=run_name,
         sweep_id=sweep_id
     )
+    
+    # Also save a simple summary in our unified run directory
+    summary_file = f"{run_dir}/run_summary.json"
+    summary = {
+        "run_name": run_name,
+        "sweep_id": sweep_id,
+        "timestamp": now_str,
+        "val_accuracy": val_metrics['accuracy'],
+        "val_confidence": val_metrics['mean_confidence'],
+        "train_accuracy": train_metrics['accuracy'],
+        "train_confidence": train_metrics['mean_confidence'],
+        "data_file": output_file,
+        "model_output_dir": f"{model_output_dir}/sweep-{run_name}",
+        "wandb_results_path": results_path
+    }
+    
+    with open(summary_file, 'w') as f:
+        json.dump(summary, f, indent=2)
+    
+    print(f"📋 Run summary saved to: {summary_file}")
     
     # ✅ Clean up for next run
     del model, trainer
@@ -314,9 +405,13 @@ if __name__ == "__main__":
             "learning_rate": 1e-5,
             "lora_r": 16,
             "lora_alpha": 32,
+            "lora_dropout": 0.1,
             "per_device_batch_size": 8,
+            "gradient_accumulation_steps": 2,
             "num_epochs": 1,
-            "lora_dropout": 0.1
+            "lora_dropout": 0.1,
+            "weight_decay": 0.0,
+            "warmup_ratio": 0.0
         }
         
         # Run single experiment

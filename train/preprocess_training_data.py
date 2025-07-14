@@ -84,6 +84,8 @@ def process_training_data(input_dir: str, output_file: str) -> None:
     total_examples = 0
     truth_examples = 0
     lie_examples = 0
+    llama_8b_examples = 0
+    filtered_examples = 0
     
     for json_file in json_files:
         print(f"Processing: {json_file.name}")
@@ -94,16 +96,23 @@ def process_training_data(input_dir: str, output_file: str) -> None:
                     try:
                         data_item = json.loads(line)
                         
-                        # Convert to training format
-                        training_example = convert_to_training_format(data_item)
-                        training_examples.append(training_example)
-                        
-                        # Count examples
-                        total_examples += 1
-                        if training_example["completion"] == "A":
-                            lie_examples += 1
+                        # Filter for Llama 8B models only
+                        model_name = data_item.get("model", "").lower()
+                        if "llama" in model_name and "8b" in model_name:
+                            llama_8b_examples += 1
+                            
+                            # Convert to training format
+                            training_example = convert_to_training_format(data_item)
+                            training_examples.append(training_example)
+                            
+                            # Count examples
+                            total_examples += 1
+                            if training_example["completion"] == "A":
+                                lie_examples += 1
+                            else:
+                                truth_examples += 1
                         else:
-                            truth_examples += 1
+                            filtered_examples += 1
                             
                     except json.JSONDecodeError as e:
                         print(f"Error parsing line {line_num} in {json_file}: {e}")
@@ -117,9 +126,12 @@ def process_training_data(input_dir: str, output_file: str) -> None:
             f.write(json.dumps(example, ensure_ascii=False) + '\n')
     
     # Print statistics
+    print(f"\nDataset Statistics:")
+    print(f"   Total examples processed: {total_examples + filtered_examples}")
+    print(f"   Llama 8B examples: {llama_8b_examples}")
+    print(f"   Filtered out (non-Llama 8B): {filtered_examples}")
+    print(f"   Final training examples: {total_examples}")
     if total_examples > 0:
-        print(f"\nDataset Statistics:")
-        print(f"   Total examples: {total_examples}")
         print(f"   Truth examples (B): {truth_examples} ({truth_examples/total_examples*100:.1f}%)")
         print(f"   Lie examples (A): {lie_examples} ({lie_examples/total_examples*100:.1f}%)")
         
@@ -132,7 +144,7 @@ def process_training_data(input_dir: str, output_file: str) -> None:
             print(f"Prompt: {example['prompt'][:200]}...")
             print(f"Completion: {example['completion']}")
     else:
-        print(f"\nNo training examples found!")
+        print(f"\nNo Llama 8B training examples found!")
     
     print(f"\nTraining data preprocessing completed!")
     print(f"Output saved to: {output_file}")
