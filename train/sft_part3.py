@@ -17,6 +17,13 @@ import random
 import os
 from datetime import datetime
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("Warning: python-dotenv not installed. Install with: pip install python-dotenv")
+
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -37,6 +44,34 @@ def prepare_lie_detection_dataset(data, tokenizer, max_length=512, format_type="
     examples = []
     total_examples = len(data)
     filtered_examples = 0
+    
+    # Print first few examples to show what the data looks like
+    print("\n" + "="*80)
+    print("TRAINING DATA EXAMPLES:")
+    print("="*80)
+    for i in range(min(3, len(data))):
+        print(f"\n--- Example {i+1} ---")
+        if format_type == "base_transcript":
+            print(f"Prompt length: {len(data[i]['prompt'])} characters")
+            print(f"Completion: '{data[i]['completion']}'")
+            
+            # Show first 200 characters of prompt
+            prompt_preview = data[i]['prompt'][:200]
+            if len(data[i]['prompt']) > 200:
+                prompt_preview += "..."
+            print(f"Prompt preview: {prompt_preview}")
+            
+            # Show last 200 characters of prompt
+            if len(data[i]['prompt']) > 200:
+                prompt_end = data[i]['prompt'][-200:]
+                print(f"Prompt end: ...{prompt_end}")
+        elif format_type == "llama_chat":
+            print(f"Messages: {len(data[i]['messages'])} messages")
+            print(f"Completion: '{data[i]['completion']}'")
+            for j, msg in enumerate(data[i]['messages']):
+                print(f"  Message {j+1} ({msg['role']}): {msg['content'][:100]}...")
+        
+        print("-" * 40)
     
     for item in data:
         if format_type == "base_transcript":
@@ -70,23 +105,15 @@ def prepare_lie_detection_dataset(data, tokenizer, max_length=512, format_type="
             # LLaMA chat format using apply_chat_template
             messages = item["messages"]
             completion = item["completion"]
-            
-            # Apply chat template to get the full conversation
-            full_conversation = tokenizer.apply_chat_template(
-                messages, 
-                tokenize=False, 
+
+            # Tokenize the full conversation using the chat template
+            conversation_tokens = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                return_tensors="pt",
                 add_generation_prompt=True
-            )
-            
-            # Tokenize the full conversation
-            conversation_tokens = tokenizer(
-                full_conversation,
-                truncation=True,
-                padding=False,
-                add_special_tokens=False,
-                max_length=max_length-1
-            )["input_ids"]
-            
+            )[0].tolist()
+
             # Tokenize the completion
             completion_tokens = tokenizer(
                 completion,
@@ -94,11 +121,7 @@ def prepare_lie_detection_dataset(data, tokenizer, max_length=512, format_type="
                 padding=False,
                 add_special_tokens=False
             )["input_ids"]
-            
-            if len(completion_tokens) != 1:
-                filtered_examples += 1
-                continue
-                
+
             input_ids = conversation_tokens + completion_tokens
             labels = [-100] * len(conversation_tokens) + completion_tokens
         
@@ -115,6 +138,20 @@ def prepare_lie_detection_dataset(data, tokenizer, max_length=512, format_type="
     print(f"   Filtered out: {filtered_examples} (completion != 1 token)")
     print(f"   Final examples: {len(examples)}")
     print(f"   Filter rate: {filtered_examples/total_examples:.1%}")
+    
+    # Print tokenization info for first few examples
+    print("\n" + "="*80)
+    print("TOKENIZATION EXAMPLES:")
+    print("="*80)
+    for i in range(min(3, len(examples))):
+        print(f"\n--- Tokenization for Example {i+1} ---")
+        input_ids = examples[i]["input_ids"]
+        labels = examples[i]["labels"]
+        print(f"Input IDs length: {len(input_ids)}")
+        print(f"Labels length: {len(labels)}")
+        print(f"Last 10 input tokens: {input_ids[-10:]}")
+        print(f"Decoded last 10 tokens: '{tokenizer.decode(input_ids[-10:])}'")
+        print(f"Completion token: {input_ids[-1]} (decoded: '{tokenizer.decode([input_ids[-1]])}')")
     
     return examples
 
@@ -179,6 +216,12 @@ def train_with_config(config=None, format_type="base_transcript"):
 
     # Load data
     print("Loading dataset...")
+    print(f"Loading from file: {output_file}")
+    print(f"File exists: {os.path.exists(output_file)}")
+    if os.path.exists(output_file):
+        file_size = os.path.getsize(output_file)
+        print(f"File size: {file_size} bytes ({file_size/1024/1024:.2f} MB)")
+    
     data = []
     with open(output_file, 'r') as f:
         for line in f:
@@ -186,6 +229,32 @@ def train_with_config(config=None, format_type="base_transcript"):
                 data.append(json.loads(line))
 
     print(f"Loaded {len(data)} examples")
+    
+    # Print dataset statistics
+    print("\n" + "="*80)
+    print("DATASET STATISTICS:")
+    print("="*80)
+    
+    # Show completion distribution
+    completions = [item['completion'] for item in data]
+    a_count = completions.count('A')
+    b_count = completions.count('B')
+    
+    print(f"Completion distribution:")
+    print(f"  A (truth): {a_count} ({a_count/len(completions)*100:.1f}%)")
+    print(f"  B (lie): {b_count} ({b_count/len(completions)*100:.1f}%)")
+    
+    # Show prompt length statistics for base_transcript format
+    if format_type == "base_transcript":
+        prompt_lengths = [len(item['prompt']) for item in data]
+        print(f"\nPrompt length statistics:")
+        print(f"  Min: {min(prompt_lengths)}, Max: {max(prompt_lengths)}, Avg: {sum(prompt_lengths)/len(prompt_lengths):.1f}")
+    
+    # Show message statistics for llama_chat format
+    elif format_type == "llama_chat":
+        message_counts = [len(item['messages']) for item in data]
+        print(f"\nMessage count statistics:")
+        print(f"  Min: {min(message_counts)}, Max: {max(message_counts)}, Avg: {sum(message_counts)/len(message_counts):.1f}")
 
     print("🔀 Shuffling data...")
 
@@ -458,3 +527,4 @@ if __name__ == "__main__":
         train_with_config(single_config, args.format)
         
         print("✨ Single experiment complete!")
+
