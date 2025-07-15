@@ -26,3 +26,4 @@ __pycache__
 *.txt
 /parquet_output/
 *.eval
+*.csv
