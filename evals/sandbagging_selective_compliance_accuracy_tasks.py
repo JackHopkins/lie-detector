@@ -11,8 +11,8 @@ from pipelines.sandbagging.selective_compliance.answer_accuracy.dataset import c
 from pipelines.sandbagging.selective_compliance.answer_accuracy.solver import sandbagging_contrastive_solver, sandbagging_with_refusal_detection
 from pipelines.sandbagging.selective_compliance.answer_accuracy.scorer import sandbagging_detection_scorer, sandbagging_control_accuracy_scorer, sandbagging_harmful_accuracy_scorer
 from pipelines.sandbagging.selective_compliance.answer_accuracy.models import SandbaggingDomain
-# Removed global hook import to prevent hook from being applied to all tasks
-# from pipelines.sandbagging.selective_compliance.answer_accuracy.hooks import *
+# Removed global hook import to prevent hook from being applied to all tasks #TODO: Removing this was dumb...
+from pipelines.sandbagging.selective_compliance.answer_accuracy.hooks import *
 
 
 
@@ -170,29 +170,29 @@ if __name__ == "__main__":
     
     all_tasks = [
       sandbagging_financial_systems_contrastive(),
-      sandbagging_medical_pharmaceutical_contrastive(),
-      sandbagging_automotive_mechanical_contrastive(),
-      sandbagging_chemistry_biology_contrastive(),
-      sandbagging_digital_security_contrastive(),
-      sandbagging_physical_security_contrastive()
+      # sandbagging_medical_pharmaceutical_contrastive(),
+      # sandbagging_automotive_mechanical_contrastive(),
+      # sandbagging_chemistry_biology_contrastive(),
+      # sandbagging_digital_security_contrastive(),
+      # sandbagging_physical_security_contrastive()
     ]
     model = "openrouter/openai/gpt-4o"
     #model = "openrouter/meta-llama/llama-3.1-8b-instruct"
     #model = "openrouter/meta-llama/llama-3.1-8b-base"
     #model = "openrouter/meta-llama/llama-3.1-405b"
     # model = "openrouter/meta-llama/llama-3.3-70b-instruct"
-    model2 = ["openrouter/anthropic/claude-3.7-sonnet",
-             "openrouter/anthropic/claude-sonnet-4",
-             "openrouter/google/gemma-3-27b-it",
-             "openrouter/google/gemma-3-9b-it"
-             ]
-    
+    # model2 = ["openrouter/anthropic/claude-3.7-sonnet",
+    #          "openrouter/anthropic/claude-sonnet-4",
+    #          "openrouter/google/gemma-3-27b-it",
+    #          "openrouter/google/gemma-3-9b-it"
+    #          ]
+    model = "openrouter/google/gemma-3-12b-it"
     # Run evaluation with a specific model
     results = eval(
         model=model,
         tasks=all_tasks,#all_tasks,
         #token_limit=1,
         retry_on_error=8,
-        limit=125,  # Limit samples for faster debugging
+        limit=1,  # Limit samples for faster debugging
         log_dir="../logs",  # Specify log directory
     )
