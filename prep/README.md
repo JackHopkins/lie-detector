@@ -2,6 +2,7 @@ Todo:
 - Balance within grouping / not within category
 - 
 
+python -m prep.dataset --model openai/gpt-4o --aggregation task-group --balance downsample
 
 python dataset.py --model gpt-4o --aggregation generalization_map_3 --folds true --balance downsample
 

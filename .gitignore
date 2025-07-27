@@ -33,3 +33,5 @@ __pycache__
 /prep/.data/
 /prep/wandb/
 /.data/
+/baseline/results/bytetrash/
+/baseline/logs/
