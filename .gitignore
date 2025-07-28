@@ -33,3 +33,6 @@ __pycache__
 /prep/.data/
 /prep/wandb/
 /.data/
+/baseline/tasks/bytetrash/
+/baseline/results/
+/baseline/results/escaped_transcript/

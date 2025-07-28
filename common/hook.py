@@ -27,6 +27,7 @@ class BaseSampleProcessingHook(Hooks):
         self.results: List[Dict[str, Any]] = []
         self.s3_sample_client: S3SampleClient = S3SampleClient()
 
+
     async def on_task_end(self, data: TaskEnd):
         """
         Hook that runs at the end of each evaluation run to parse logs and create JSONL output.
