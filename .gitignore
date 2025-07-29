@@ -36,9 +36,10 @@ __pycache__
 /baseline/tasks/bytetrash/
 /baseline/results/
 /baseline/results/escaped_transcript/
-/baseline/tasks/bytetrash/
-/baseline/results/
-/baseline/results/escaped_transcript/
 /pipelines/offpolicy/logs/
 /pipelines/offpolicy/truth_is_universal/cache/
 /evals/cache/
+/baseline/results/bytetrash/
+/baseline/logs/
+/baseline/tasks/bytetrash/logs/
+/baseline/tasks/bytetrash/cache/
