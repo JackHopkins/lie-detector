@@ -5,7 +5,7 @@ import numpy as np
 from inspect_ai import Task, eval
 from inspect_ai.dataset import Sample, MemoryDataset
 from inspect_ai.solver import Solver, TaskState, Generate, solver
-from inspect_ai.model import ChatMessageUser, ChatMessageAssistant
+from inspect_ai.model import ChatMessageUser, ChatMessageAssistant, GenerateConfig
 
 from baseline.dataset import load_jsonl_data
 from baseline.tasks import get_samples
@@ -240,7 +240,8 @@ def create_logit_bytetrash_classification_dataset(result) -> MemoryDataset:
 
 def create_logit_bytetrash_task(
         model_name: str,
-        instruction: str = "Please think and write down 128 random characters. Do not write anything else."
+        instruction: str = "Please think and write down 128 random characters. Do not write anything else.",
+        fold: str = "offpolicy"
 ) -> Task:
     """
     Create a logit-based bytetrash task.
@@ -252,7 +253,7 @@ def create_logit_bytetrash_task(
     Returns:
         Task configured for logit-based bytetrash
     """
-    raw_data = get_samples(model_name)
+    raw_data = get_samples(model_name, fold)
 
     # Create samples
     dataset = create_logit_bytetrash_question_dataset(raw_data)
@@ -268,17 +269,16 @@ def create_logit_bytetrash_task(
 
 
 if __name__ == '__main__':
-    model = 'openai/gpt-4o'
-    instruction = "Please write down a random sequence of exactly 16 digits. Do not write anything else."
+    model = 'openai/gpt-4o'#'openrouter/google/gemma-3-12b-it'
+    #model = ""
+    instruction = "Please write down a random sequence of exactly 16 digits, each separated by a space. Do not write anything else."
 
     # Run evaluation with logit collection
     result = eval(
         tasks=[create_logit_bytetrash_task(model_name=model, instruction=instruction)],
         model=model,
         log_dir="../../logs/logit_bytetrash",
-        limit=1000,
-        logprobs=True,  # Ensure logprobs are collected
-        top_logprobs=20  # Collect top 20 logprobs for each token
+        limit=100,
     )
 
     # Create classification dataset with logit features
