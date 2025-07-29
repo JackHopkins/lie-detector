@@ -41,3 +41,4 @@ __pycache__
 /baseline/results/escaped_transcript/
 /pipelines/offpolicy/logs/
 /pipelines/offpolicy/truth_is_universal/cache/
+/evals/cache/

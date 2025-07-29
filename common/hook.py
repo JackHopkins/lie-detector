@@ -143,9 +143,17 @@ class BaseSampleProcessingHook(Hooks):
 
         except Exception as e:
             print(f"[LogParserHook] Error processing log file: {e}")
-        finally:
-            # Clean up executor when done
-            self.executor.shutdown(wait=False)
+            # Removed the finally block that was shutting down the executor
+
+    async def on_run_end(self, data: RunEnd):
+        """
+        Hook that runs at the very end of the entire run (after all tasks).
+        This is where we clean up the executor.
+        """
+        # Shutdown the executor when the entire run is complete
+        if hasattr(self, 'executor') and self.executor:
+            self.executor.shutdown(wait=True)
+            print(f"[LogParserHook] Executor shutdown complete")
 
     @abstractmethod
     def process_sample(self, sample: Any, eval_log: EvalLog) -> Optional[Dict[str, Any]]:
