@@ -42,6 +42,7 @@ class BaseSampleProcessingHook(Hooks):
             parsed_entry
         )
 
+
     async def on_task_end(self, data: TaskEnd):
         """
         Hook that runs at the end of each evaluation run to parse logs and create JSONL output.

@@ -182,7 +182,6 @@ generalization_map_3 = {
         "n-truths-and-a-lie_travel_experiences",
     ],
     "mask1": [
-     
         "mask_continuations",
         "mask_disinformation",
     ],
@@ -210,7 +209,7 @@ generalization_map_3 = {
         "sycophancy_feedback_user_dislikes",
         "sycophancy_are_you_sure",
     ],
-    "self": [
+    "self-sycophancy": [
         "self-sycophancy_correctness_arc",
         "self-sycophancy_correctness_biology",
         "self-sycophancy_correctness_chemistry",
@@ -220,12 +219,26 @@ generalization_map_3 = {
         "self-sycophancy_harmfulness_deontology",
         "self-sycophancy_harmfulness_justice",
     ],
-    "cot": [
+    "cot-unfaithfulness": [
         "cot-unfaithfulness_contrastive_mmlu",
         "cot-unfaithfulness_contrastive_arc",
         "cot-unfaithfulness_mmlu_contrastive",
         "cot-unfaithfulness_arc_contrastive",
     ],
+    "unanswerable": [
+        "unanswerable-claims_art",
+        "unanswerable-claims_history",
+        "unanswerable-claims_politics",
+        "unanswerable-claims_legal",
+        "unanswerable-claims_mathematics",
+        "unanswerable-claims_fiction",
+        "unanswerable-claims_philosophy",
+        "unanswerable-claims_science",
+    ],
+    "offpolicy": [
+        "off-policy_dolus_chat",
+        "off-policy_truth_is_universal",
+    ]
 }
 
 # Subject

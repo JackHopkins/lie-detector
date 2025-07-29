@@ -28,7 +28,7 @@ class LieDetectionDataProcessor:
         self.generalization_maps = {
             'generalization_map_1': generalization_map_1,
             'generalization_map_2': generalization_map_2,
-            'generalization_map_3': generalization_map_3
+            'task-group': generalization_map_3
         }
 
     def deduplicate_samples(self) -> List[Dict]:
@@ -355,7 +355,7 @@ def save_training_files(train_data: List[Dict], val_data: List[Dict],
 def main():
     parser = argparse.ArgumentParser(description='Prepare lie detection data for fine-tuning')
     parser.add_argument('--model', help='Model identifier (e.g., openai/gpt-4o)', default='openai/gpt-4o')
-    parser.add_argument('--aggregation', choices=['generalization_map_1', 'generalization_map_2', 'generalization_map_3', 'none'],
+    parser.add_argument('--aggregation', choices=['generalization_map_1', 'generalization_map_2', 'task-group', 'none'],
                         default='generalization_map_3', help='Aggregation strategy for categorizing tasks')
     parser.add_argument('--folds', type=lambda x: x.lower() == 'true', default=True,
                         help='Whether to create cross-validation folds')
