@@ -38,3 +38,14 @@ __pycache__
 /baseline/results/escaped_transcript/
 /pipelines/offpolicy/logs/
 /pipelines/offpolicy/truth_is_universal/cache/
+/evals/cache/
+/baseline/results/bytetrash/
+/baseline/logs/
+/baseline/tasks/bytetrash/logs/
+/baseline/tasks/bytetrash/cache/
+/common/misc/deduplicated_samples.json
+/common/misc/deduplicated_samples_2.json
+/common/misc/deduplicated_samples_2_embeddings.npy
+/common/misc/deduplicated_samples_embeddings.npy
+/common/misc/generated_sandbagging_samples_10000_gpt.json
+/common/misc/generated_sandbagging_samples_temp_3529.json

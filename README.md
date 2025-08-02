@@ -1,4 +1,22 @@
-# Train
+
+# Prepare Dataset
+
+This downloads the data from S3 and constructs balanced, trainable subsets.
+```
+python -m prep.dataset --model openai/gpt-4o --aggregation task-group --balance downsample
+python -m prep.dataset --model google/gemma-3-12b-it --aggregation task-group --balance downsample
+```
+
+# Baselines
+
+TODO
+I would like something like
+```
+python -m baselines --model openai/gpt-4o --limit 100
+```
+
+```
+@deprecated
 python -m prep.train --dataset .data/openai/gpt_4o/mask --model gpt-4o-2024-08-06 --size 128
 
 python -m prep.dataset --model openai/gpt-4o --aggregation generalization_map_3 --folds true --balance downsample
