@@ -914,9 +914,9 @@ def main():
     
     # Configuration (defined outside the loop)
     config = {
-        'learning_rate': args.learning_rate,
+        'learning_rate': 2e-4,
         'batch_size': 8,
-        'eval_batch_size': 8,  # Larger batch size for evaluation
+        'eval_batch_size': 16,  # Larger batch size for evaluation
         'lora_r': 8,
         'lora_alpha': 16,
         'lora_dropout': 0.05,
@@ -973,8 +973,7 @@ def main():
                     'test': test_data
                 }
         
-        # max_steps = calculate_max_steps(all_fold_data)
-        max_steps = 500
+        max_steps = calculate_max_steps(all_fold_data)
         
         # Create output directory
         output_dir = f"./outputs/{timestamp}/lr_{config['learning_rate']}/{model_dir}_train_one_eval_all_{timestamp}"
