@@ -54,7 +54,7 @@
    uv pip install --no-deps -r requirements_train.txt
    pip install boto3 matplotlib numpy
    ```
-
+   
 ### 3. **Organize S3 Data**
    ```bash
    python common/organize_s3_data_by_model_boto3.py
@@ -107,6 +107,7 @@ Training data is generated in:
    - Fold splits: `{model}/folds_colors_base_transcript/{category}/{train,test}/`
 
 ## Requirements
+
 - Python virtual environment (e.g., `lies310`)
 - `boto3` for S3 access
 - `matplotlib`, `numpy` for visualizations
