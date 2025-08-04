@@ -324,6 +324,173 @@ def save_training_files(train_data: List[Dict], val_data: List[Dict],
     logger.info(f"Saved fold metadata to {metadata_file}")
 
 
+def verify_dataset(base_dir: Path, aggregation: str = 'task-group'):
+    """
+    Verify dataset by analyzing the distribution of did_lie/didn't lie for each domain.
+    
+    Args:
+        base_dir: Base directory containing the dataset files
+        aggregation: Aggregation strategy ('motivation', 'knowledge', 'task-group', 'none')
+    """
+    logger.info("=" * 70)
+    logger.info("DATASET VERIFICATION - LIE DISTRIBUTION ANALYSIS")
+    logger.info("=" * 70)
+    logger.info(f"Base directory: {base_dir}")
+    logger.info(f"Aggregation: {aggregation}")
+    logger.info("")
+    
+    # Get the generalization map
+    generalization_maps = {
+        'motivation': generalization_map_1,
+        'knowledge': generalization_map_2,
+        'task-group': generalization_map_3
+    }
+    
+    # Overall statistics
+    overall_stats = {
+        'total_samples': 0,
+        'total_lies': 0,
+        'total_truths': 0,
+        'by_domain': {},
+        'by_task': defaultdict(lambda: {'lies': 0, 'truths': 0, 'total': 0})
+    }
+    
+    # Find all train/val files
+    dataset_files = list(base_dir.glob("**/train.jsonl")) + list(base_dir.glob("**/val.jsonl"))
+    
+    if not dataset_files:
+        logger.error(f"No dataset files found in {base_dir}")
+        return
+    
+    logger.info(f"Found {len(dataset_files)} dataset files")
+    logger.info("")
+    
+    # Process each file
+    for file_path in dataset_files:
+        file_type = "train" if file_path.name == "train.jsonl" else "val"
+        domain = file_path.parent.name if file_path.parent != base_dir else "root"
+        
+        if domain not in overall_stats['by_domain']:
+            overall_stats['by_domain'][domain] = {
+                'train': {'lies': 0, 'truths': 0, 'total': 0},
+                'val': {'lies': 0, 'truths': 0, 'total': 0},
+                'combined': {'lies': 0, 'truths': 0, 'total': 0},
+                'by_task': defaultdict(lambda: {'lies': 0, 'truths': 0, 'total': 0})
+            }
+        
+        # Read and analyze file
+        with open(file_path, 'r') as f:
+            for line in f:
+                try:
+                    sample = json.loads(line)
+                    meta = sample.get('meta', {})
+                    did_lie = meta.get('did_lie', False)
+                    task = meta.get('task', 'unknown')
+                    
+                    # Update overall stats
+                    overall_stats['total_samples'] += 1
+                    if did_lie:
+                        overall_stats['total_lies'] += 1
+                    else:
+                        overall_stats['total_truths'] += 1
+                    
+                    # Update domain stats
+                    overall_stats['by_domain'][domain][file_type]['total'] += 1
+                    overall_stats['by_domain'][domain]['combined']['total'] += 1
+                    
+                    if did_lie:
+                        overall_stats['by_domain'][domain][file_type]['lies'] += 1
+                        overall_stats['by_domain'][domain]['combined']['lies'] += 1
+                    else:
+                        overall_stats['by_domain'][domain][file_type]['truths'] += 1
+                        overall_stats['by_domain'][domain]['combined']['truths'] += 1
+                    
+                    # Update task stats
+                    overall_stats['by_task'][task]['total'] += 1
+                    overall_stats['by_domain'][domain]['by_task'][task]['total'] += 1
+                    
+                    if did_lie:
+                        overall_stats['by_task'][task]['lies'] += 1
+                        overall_stats['by_domain'][domain]['by_task'][task]['lies'] += 1
+                    else:
+                        overall_stats['by_task'][task]['truths'] += 1
+                        overall_stats['by_domain'][domain]['by_task'][task]['truths'] += 1
+                        
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse line in {file_path}")
+                except Exception as e:
+                    logger.warning(f"Error processing sample in {file_path}: {e}")
+    
+    # Print results
+    logger.info("📊 OVERALL STATISTICS:")
+    logger.info(f"  Total samples: {overall_stats['total_samples']:,}")
+    logger.info(f"  Total lies: {overall_stats['total_lies']:,} ({overall_stats['total_lies']/overall_stats['total_samples']*100:.1f}%)")
+    logger.info(f"  Total truths: {overall_stats['total_truths']:,} ({overall_stats['total_truths']/overall_stats['total_samples']*100:.1f}%)")
+    logger.info("")
+    
+    # Print domain statistics
+    logger.info("📁 STATISTICS BY DOMAIN:")
+    for domain, stats in sorted(overall_stats['by_domain'].items()):
+        logger.info(f"\n  Domain: {domain}")
+        logger.info(f"  " + "-" * 50)
+        
+        # Combined stats
+        combined = stats['combined']
+        if combined['total'] > 0:
+            logger.info(f"  Combined: {combined['total']:,} samples")
+            logger.info(f"    - Lies: {combined['lies']:,} ({combined['lies']/combined['total']*100:.1f}%)")
+            logger.info(f"    - Truths: {combined['truths']:,} ({combined['truths']/combined['total']*100:.1f}%)")
+        
+        # Train/Val breakdown
+        for split in ['train', 'val']:
+            split_stats = stats[split]
+            if split_stats['total'] > 0:
+                logger.info(f"  {split.capitalize()}: {split_stats['total']:,} samples")
+                logger.info(f"    - Lies: {split_stats['lies']:,} ({split_stats['lies']/split_stats['total']*100:.1f}%)")
+                logger.info(f"    - Truths: {split_stats['truths']:,} ({split_stats['truths']/split_stats['total']*100:.1f}%)")
+        
+        # Top tasks in this domain
+        if stats['by_task']:
+            logger.info(f"\n  Top tasks in {domain}:")
+            sorted_tasks = sorted(stats['by_task'].items(), 
+                                key=lambda x: x[1]['total'], 
+                                reverse=True)[:5]
+            for task, task_stats in sorted_tasks:
+                logger.info(f"    • {task}: {task_stats['total']:,} samples "
+                          f"({task_stats['lies']:,} lies, {task_stats['truths']:,} truths)")
+    
+    # Print task statistics
+    logger.info("\n📋 TOP TASKS OVERALL:")
+    sorted_tasks = sorted(overall_stats['by_task'].items(), 
+                        key=lambda x: x[1]['total'], 
+                        reverse=True)[:20]
+    
+    for task, stats in sorted_tasks:
+        lie_pct = stats['lies']/stats['total']*100 if stats['total'] > 0 else 0
+        logger.info(f"  • {task}: {stats['total']:,} samples "
+                  f"({stats['lies']:,} lies [{lie_pct:.1f}%], "
+                  f"{stats['truths']:,} truths [{100-lie_pct:.1f}%])")
+    
+    # Save verification report
+    report_file = base_dir / "verification_report.json"
+    with open(report_file, 'w') as f:
+        json.dump({
+            'timestamp': datetime.now().isoformat(),
+            'base_dir': str(base_dir),
+            'aggregation': aggregation,
+            'overall': {
+                'total_samples': overall_stats['total_samples'],
+                'total_lies': overall_stats['total_lies'],
+                'total_truths': overall_stats['total_truths'],
+                'lie_percentage': overall_stats['total_lies']/overall_stats['total_samples']*100 if overall_stats['total_samples'] > 0 else 0
+            },
+            'by_domain': dict(overall_stats['by_domain']),
+            'by_task': dict(overall_stats['by_task'])
+        }, f, indent=2)
+    
+    logger.info(f"\n✅ Verification report saved to: {report_file}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Prepare lie detection data for fine-tuning')
     parser.add_argument('--model', help='Model identifier (e.g., openai/gpt-4o)', default='google/gemma-3-12b-it')
@@ -344,6 +511,9 @@ def main():
     parser.add_argument('--hf-repo', default='Noddybear/lies', help='Hugging Face repository ID')
     parser.add_argument('--hf-token', help='Hugging Face API token (or set HF_TOKEN env var)')
     parser.add_argument('--hf-private', action='store_true', help='Make uploaded dataset private')
+    
+    # Add verify mode
+    parser.add_argument('--verify', action='store_true', help='Run verification mode to analyze lie distribution')
 
     args = parser.parse_args()
 
@@ -358,6 +528,11 @@ def main():
     # Create base output directory
     base_output_dir = Path(args.output_dir) / clean_provider / clean_model
     base_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # If verify mode, run verification and exit
+    if args.verify:
+        verify_dataset(base_output_dir, args.aggregation)
+        return
 
     log_file = base_output_dir / "report.log"
     file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
@@ -396,11 +571,8 @@ def main():
         logger.info("    → 80/20 train/val split")
     else:
         logger.info("  • No task categorization - treating all samples equally")
-        if args.folds:
-            logger.info("  • Creating multiple random k-fold cross-validation splits")
-        else:
-            logger.info("  • Creating a single split")
-            logger.info("    → 80/20 train/val split")
+        logger.info("  • Creating a single split")
+        logger.info("    → 80/20 train/val split")
 
     if args.balance != 'none':
         logger.info(f"  • Balancing lies vs truths using {args.balance} strategy")
@@ -493,17 +665,10 @@ def main():
         if args.size and len(all_samples) > args.size:
             all_samples = random.sample(all_samples, args.size)
 
-        if args.folds:
-            # Multiple numeric folds
-            logger.info(f"  Creating k-fold cross-validation splits...")
-            splits = processor._create_kfold_splits(all_samples, args.size, args.validation_split)
-            folds = [(f"fold_{i}", train, val, test) for i, (train, val, test) in enumerate(splits)]
-            logger.info(f"  ✓ Created {len(folds)} random folds")
-        else:
-            # Single fold (no subdirectory)
-            logger.info(f"  Creating single 80/20 train/val split...")
-            splits = processor._create_kfold_splits(all_samples, None, args.validation_split)
-            folds = [("", splits[0][0], splits[0][1], None)]  # Empty name for single fold
+        # Single fold (no subdirectory)
+        logger.info(f"  Creating single 80/20 train/val split...")
+        splits = processor._create_kfold_splits(all_samples, None, args.validation_split)
+        folds = [("", splits[0][0], splits[0][1], None)]  # Empty name for single fold
 
     # Create master summary
     master_summary = {
