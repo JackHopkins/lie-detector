@@ -1,9 +1,8 @@
 import argparse
-from datetime import datetime
 import os
+from datetime import datetime
 from itertools import product
 
-import numpy as np
 import pandas as pd
 
 from baseline.tasks.bytetrash.classifiers import main as run_classifiers

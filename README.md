@@ -4,7 +4,10 @@
 This downloads the data from S3 and constructs balanced, trainable subsets.
 ```
 python -m prep.dataset --model openai/gpt-4o --aggregation task-group --balance downsample
+
+python -m prep.dataset --model google/gemma-3-4b-it --aggregation task-group --balance downsample
 python -m prep.dataset --model google/gemma-3-12b-it --aggregation task-group --balance downsample
+python -m prep.dataset --model google/gemma-3-27b-it --aggregation task-group --balance downsample
 ```
 
 # Baselines
