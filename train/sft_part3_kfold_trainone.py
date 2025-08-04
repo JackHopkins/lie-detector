@@ -1,6 +1,7 @@
 import torch
 import json
 import os
+import argparse
 from pathlib import Path
 from transformers import (
     AutoTokenizer, 
@@ -638,14 +639,22 @@ def run_train_one_eval_all(input_path, config):
 
 
 def main():
+    ## Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train lie detection models with different learning rates')
+    parser.add_argument('--learning_rate', type=float, default=2e-4, help='Learning rate for training (default: 2e-4)')
+    parser.add_argument('--base_input_path', type=str, 
+                    default="/workspace/lie-detector/organized_balanced_training_20250727_201402_cleaned_random",
+                    help='Base input path containing model directories')
+    args = parser.parse_args()
+
     # Set environment variables for better memory management
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
     
     # Base input path
-    base_input_path = "/workspace/lie-detector/organized_balanced_training_20250727_201402_cleaned"
-    # Get all model subdirectories
+    # Use the argument for base input path
+    base_input_path = args.base_input_path    # Get all model subdirectories
     model_dirs = [d for d in os.listdir(base_input_path) if os.path.isdir(os.path.join(base_input_path, d)) and d.startswith('openrouter_google_gemma-3-')]
     
     print(f"Found model directories: {model_dirs}")
@@ -658,13 +667,14 @@ def main():
     }
     
     all_model_results = {}
+
     
     # Configuration (defined outside the loop)
     config = {
-        'learning_rate': 2e-4,
+        'learning_rate': args.learning_rate,
         'batch_size': 8,
-        'eval_batch_size': 16,  # Larger batch size for evaluation
-        'lora_r': 8,
+        'eval_batch_size': 8,  # Larger batch size for evaluation
+        'lora_r': 16,
         'lora_alpha': 16,
         'lora_dropout': 0.05,
         'gradient_accumulation_steps': 2,
@@ -720,7 +730,8 @@ def main():
                     'test': test_data
                 }
         
-        max_steps = calculate_max_steps(all_fold_data)
+        # max_steps = calculate_max_steps(all_fold_data)
+        max_steps = 500
         
         # Create output directory
         output_dir = f"./outputs/{timestamp}/lr_{config['learning_rate']}/{model_dir}_train_one_eval_all_{timestamp}"
