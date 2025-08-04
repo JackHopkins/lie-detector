@@ -170,8 +170,8 @@ if __name__ == "__main__":
     ]
 
     models = ["openrouter/google/gemma-3-27b-it",
-     "openrouter/google/gemma-3-4b-it",
-   "openrouter/google/gemma-3-12b-it"]
+              "openrouter/google/gemma-3-4b-it",
+              "openrouter/google/gemma-3-12b-it"]
 
     # Run evaluation with a specific model
     results = eval(
