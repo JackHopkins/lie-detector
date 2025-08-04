@@ -62,10 +62,11 @@ if __name__ == "__main__":
     # )
 
     all_tasks = [
-        alibi_assault_task(),
-        alibi_breaking_entering_task(),
+        #alibi_assault_task(),
+        #alibi_breaking_entering_task(),
         alibi_fraud_task(),
         alibi_workplace_task(),
+        alibi_theft_task(),
     ]
 
     print("Running all alibi tasks...")
@@ -74,7 +75,7 @@ if __name__ == "__main__":
     # Run evaluation with all tasks
     # model = "openrouter/meta-llama/llama-3.1-8b-instruct"
 
-    model = "openrouter/google/gemma-3-27b-it"
+    model = ["openrouter/google/gemma-3-27b-it", "openrouter/google/gemma-3-12b-it", "openrouter/google/gemma-3-4b-it"]
 
     results = eval(
         tasks=all_tasks,

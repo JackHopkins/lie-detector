@@ -19,7 +19,7 @@ from pipelines.sandbagging.capability_denial.ascii_art.dataset import create_asc
 from pipelines.sandbagging.capability_denial.ascii_art.scorer import ascii_multiple_choice_sandbagging_scorer
 from pipelines.sandbagging.capability_denial.ascii_art.solver import ascii_multiple_choice_sandbagging_solver
 # Removed global hook import to prevent hook from being applied to all tasks
-# from pipelines.sandbagging.capability_denial.ascii_art.hook import *
+from pipelines.sandbagging.capability_denial.ascii_art.hook import *
 
 @task
 def ascii_sandbagging_task(
@@ -94,12 +94,12 @@ if __name__ == "__main__":
     task = ascii_sandbagging_task()
     #model = "openrouter/google/gemma-3-27b-it"#"openrouter/meta-llama/llama-3.1-8b-instruct"
     #model = "openrouter/meta-llama/llama-3.3-70b-instruct"
-    model = "openrouter/openai/gpt-4o"
+    model = ["openrouter/google/gemma-3-4b-it", "openrouter/google/gemma-3-12b-it", "openrouter/google/gemma-3-27b-it"]#"openrouter/openai/gpt-4o"
 
     # Run evaluation with a specific model
     results = eval(
         tasks=[task],
         model=model,  # or any model you want to test
-        limit=125,  # Limit samples for faster debugging
+        limit=1500,  # Limit samples for faster debugging
         log_dir="../logs",  # Specify log directory
     )
