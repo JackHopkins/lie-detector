@@ -1,0 +1,46 @@
+{
+  "created_at": "2025-08-04T17:46:39.491116",
+  "bundled_folds": {
+    "train": [
+      "games",
+      "ascii"
+    ],
+    "eval": [
+      "cot-unfaithfulness",
+      "mask-factual",
+      "mask-roleplay",
+      "offpolicy",
+      "sandbagging",
+      "self-sycophancy",
+      "sycophancy",
+      "unanswerable"
+    ]
+  },
+  "statistics": {
+    "train": {
+      "total": 64,
+      "lies": 32,
+      "truths": 32
+    },
+    "eval": {
+      "total": 64,
+      "lies": 32,
+      "truths": 32
+    }
+  },
+  "config": {
+    "dataset_path": ".data/google/gemma_3_12b_it",
+    "format_type": "chat",
+    "balance_strategy": "downsample",
+    "seed": 42,
+    "max_train_examples": 64,
+    "max_eval_examples": 64,
+    "val_split": null,
+    "size": 64
+  },
+  "merge_statistics": {
+    "total_processed": 16715,
+    "examples_with_merges": 396,
+    "merge_rate": 0.023691295243793
+  }
+}
