@@ -48,6 +48,26 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+def is_main_process():
+    """Check if this is the main process in distributed training."""
+    # Check various distributed training scenarios
+
+    # For torch.distributed
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+
+    # For DeepSpeed
+    if 'RANK' in os.environ:
+        return int(os.environ['RANK']) == 0
+
+    # For local rank (used by various distributed frameworks)
+    if 'LOCAL_RANK' in os.environ:
+        return int(os.environ['LOCAL_RANK']) == 0
+
+    # If not in distributed mode, we're the main process
+    return True
+
+
 class LieDetectionSFT:
     """Main class for supervised fine-tuning of lie detection models."""
 
@@ -61,6 +81,7 @@ class LieDetectionSFT:
     def __init__(self, args):
         self.args = args
         self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.is_main = is_main_process()
         self.setup_directories()
         self.authenticate_huggingface()
 
@@ -70,10 +91,12 @@ class LieDetectionSFT:
 
         try:
             login(token=token)
-            logger.info("Successfully authenticated with HuggingFace")
+            if self.is_main:
+                logger.info("Successfully authenticated with HuggingFace")
         except Exception as e:
-            logger.warning(f"Failed to authenticate with HuggingFace: {e}")
-            logger.warning("Continuing without authentication - this may fail for gated models")
+            if self.is_main:
+                logger.warning(f"Failed to authenticate with HuggingFace: {e}")
+                logger.warning("Continuing without authentication - this may fail for gated models")
 
     def setup_directories(self):
         """Create necessary directories for the run."""
@@ -81,11 +104,16 @@ class LieDetectionSFT:
         self.data_dir = self.run_dir / "data"
         self.model_dir = self.run_dir / "models"
 
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.data_dir.mkdir(exist_ok=True)
-        self.model_dir.mkdir(exist_ok=True)
+        # Only create directories on main process to avoid race conditions
+        if self.is_main:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            self.data_dir.mkdir(exist_ok=True)
+            self.model_dir.mkdir(exist_ok=True)
+            logger.info(f"Created run directory: {self.run_dir}")
 
-        logger.info(f"Created run directory: {self.run_dir}")
+        # Ensure all processes wait for directories to be created
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     def discover_experiments(self, data_path: Path) -> List[str]:
         """Discover available experiments in the bundled dataset."""
@@ -112,7 +140,8 @@ class LieDetectionSFT:
                 for line in f:
                     if line.strip():
                         train_data.append(json.loads(line))
-            logger.info(f"Loaded {len(train_data)} training samples from {train_file}")
+            if self.is_main:
+                logger.info(f"Loaded {len(train_data)} training samples from {train_file}")
 
         # Load evaluation data (named val.jsonl in bundler output)
         eval_file = experiment_path / "val.jsonl"
@@ -121,7 +150,8 @@ class LieDetectionSFT:
                 for line in f:
                     if line.strip():
                         eval_data.append(json.loads(line))
-            logger.info(f"Loaded {len(eval_data)} evaluation samples from {eval_file}")
+            if self.is_main:
+                logger.info(f"Loaded {len(eval_data)} evaluation samples from {eval_file}")
 
         # Load metadata
         metadata = {}
@@ -136,7 +166,7 @@ class LieDetectionSFT:
         """Prepare training and evaluation datasets from bundled data."""
         # Determine data path
         data_path = Path(self.args.data_dir)
-        model_subdir = self.args.model.replace('-', '_')#.replace('/', '_')
+        model_subdir = self.args.model.replace('-', '_')
         model_data_path = data_path / model_subdir
 
         if not model_data_path.exists():
@@ -160,13 +190,14 @@ class LieDetectionSFT:
 
             # Sort by creation time if possible, otherwise use alphabetical
             experiment_path = model_data_path / experiments[-1]
-            logger.info(f"Auto-selected experiment: {experiments[-1]}")
+            if self.is_main:
+                logger.info(f"Auto-selected experiment: {experiments[-1]}")
 
         # Load bundled data
         train_samples, eval_samples, metadata = self.load_bundled_data(experiment_path)
 
-        # Log metadata info
-        if metadata:
+        # Log metadata info (only on main process)
+        if metadata and self.is_main:
             logger.info(f"Loaded experiment metadata:")
             logger.info(f"  Created at: {metadata.get('created_at', 'unknown')}")
             logger.info(f"  Train folds: {metadata.get('bundled_folds', {}).get('train', [])}")
@@ -185,15 +216,19 @@ class LieDetectionSFT:
         if self.args.size:
             if len(train_samples) > self.args.size:
                 train_samples = random.sample(train_samples, self.args.size)
-                logger.info(f"Limited training samples to {self.args.size}")
+                if self.is_main:
+                    logger.info(f"Limited training samples to {self.args.size}")
             if len(eval_samples) > self.args.size:
                 eval_samples = random.sample(eval_samples, self.args.size)
-                logger.info(f"Limited evaluation samples to {self.args.size}")
+                if self.is_main:
+                    logger.info(f"Limited evaluation samples to {self.args.size}")
 
-        logger.info(f"Final dataset sizes - Train: {len(train_samples)}, Eval: {len(eval_samples)}")
+        if self.is_main:
+            logger.info(f"Final dataset sizes - Train: {len(train_samples)}, Eval: {len(eval_samples)}")
 
-        # Save datasets to run directory for reference
-        self.save_datasets(train_samples, eval_samples)
+        # Save datasets to run directory for reference (only on main process)
+        if self.is_main:
+            self.save_datasets(train_samples, eval_samples)
 
         return train_samples, eval_samples
 
@@ -262,6 +297,10 @@ class LieDetectionSFT:
 
     def find_optimal_batch_size(self, model, tokenizer, sample_data, max_length=2048):
         """Find the optimal batch size for the current hardware."""
+        # Only run on main process
+        if not self.is_main:
+            return 16  # Return default for non-main processes
+
         # More conservative batch sizes for 12B model with Flash Attention
         test_batch_sizes = [32, 24, 16, 12, 8, 6, 4, 2, 1]
         optimal_batch_size = 1
@@ -342,20 +381,22 @@ class LieDetectionSFT:
 
     def train(self):
         """Main training function."""
-        # Initialize wandb
-        experiment_name = self.args.experiment if self.args.experiment else "auto"
-        wandb.init(
-            project=self.args.wandb_project,
-            name=f"sft_{self.args.model.replace('/', '-')}_{experiment_name}_{self.timestamp}",
-            config=vars(self.args)
-        )
+        # Initialize wandb ONLY on the main process
+        if self.is_main:
+            experiment_name = self.args.experiment if self.args.experiment else "auto"
+            wandb.init(
+                project=self.args.wandb_project,
+                name=f"sft_{self.args.model.replace('/', '-')}_{experiment_name}_{self.timestamp}",
+                config=vars(self.args)
+            )
 
         # Prepare datasets
         train_samples, eval_samples = self.prepare_datasets()
 
         # Get actual model name
         model_name = self.MODEL_MAPPINGS.get(self.args.model, self.args.model)
-        logger.info(f"Loading model: {model_name}")
+        if self.is_main:
+            logger.info(f"Loading model: {model_name}")
 
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
@@ -370,11 +411,12 @@ class LieDetectionSFT:
         if self.args.use_deepspeed:
             if os.path.exists(self.args.deepspeed_config):
                 use_deepspeed = True
-                logger.info(f"Using DeepSpeed with config: {self.args.deepspeed_config}")
+                if self.is_main:
+                    logger.info(f"Using DeepSpeed with config: {self.args.deepspeed_config}")
             else:
-                logger.warning(f"DeepSpeed requested but config file not found: {self.args.deepspeed_config}")
-                logger.warning("Continuing without DeepSpeed")
-
+                if self.is_main:
+                    logger.warning(f"DeepSpeed requested but config file not found: {self.args.deepspeed_config}")
+                    logger.warning("Continuing without DeepSpeed")
 
         # Configure model loading with optimizations
         if self.args.use_4bit:
@@ -387,7 +429,6 @@ class LieDetectionSFT:
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 quantization_config=bnb_config,
-                #device_map="cuda",
                 token=os.environ.get('HF_TOKEN', HF_TOKEN),
                 trust_remote_code=True,
                 attn_implementation="flash_attention_2" if self.args.use_flash_attention else "sdpa"
@@ -399,18 +440,18 @@ class LieDetectionSFT:
                 try:
                     import flash_attn
                     attn_implementation = "flash_attention_2"
-                    logger.info("Using Flash Attention 2")
+                    if self.is_main:
+                        logger.info("Using Flash Attention 2")
                 except ImportError:
-                    logger.warning("Flash Attention requested but not available, falling back to SDPA")
+                    if self.is_main:
+                        logger.warning("Flash Attention requested but not available, falling back to SDPA")
 
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch.bfloat16,
-                #device_map="cuda",
                 token=os.environ.get('HF_TOKEN', HF_TOKEN),
                 trust_remote_code=True,
                 attn_implementation=attn_implementation,
-                #max_memory={i: "79GiB" for i in range(torch.cuda.device_count())}
             )
 
         # Disable cache and enable gradient checkpointing
@@ -428,7 +469,9 @@ class LieDetectionSFT:
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
         model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
+
+        if self.is_main:
+            model.print_trainable_parameters()
 
         # Find optimal batch size if set to auto (-1)
         if self.args.batch_size == -1:
@@ -448,11 +491,12 @@ class LieDetectionSFT:
             else:
                 break
 
-        logger.info(f"Training configuration:")
-        logger.info(f"  GPUs: {world_size}")
-        logger.info(f"  Per-device batch size: {effective_batch_size}")
-        logger.info(f"  Gradient accumulation steps: {gradient_accumulation_steps}")
-        logger.info(f"  Total batch size: {effective_batch_size * gradient_accumulation_steps * world_size}")
+        if self.is_main:
+            logger.info(f"Training configuration:")
+            logger.info(f"  GPUs: {world_size}")
+            logger.info(f"  Per-device batch size: {effective_batch_size}")
+            logger.info(f"  Gradient accumulation steps: {gradient_accumulation_steps}")
+            logger.info(f"  Total batch size: {effective_batch_size * gradient_accumulation_steps * world_size}")
 
         # Tokenize datasets
         train_dataset = self.tokenize_samples(train_samples, tokenizer, max_length=self.args.max_length)
@@ -492,12 +536,11 @@ class LieDetectionSFT:
             bf16=True,
             bf16_full_eval=True,
             tf32=True,  # Enable TF32 for H100s
-            report_to="wandb",
+            report_to=["wandb"] if self.is_main else [],  # Only report to wandb on main process
             dataloader_num_workers=self.args.num_workers,
             dataloader_pin_memory=True,  # Pin memory for faster transfers
             remove_unused_columns=False,
-            ddp_find_unused_parameters=False,
-            #find_unused_parameters=True,
+            ddp_find_unused_parameters=True,
             gradient_checkpointing=True,
             gradient_checkpointing_kwargs={"use_reentrant": False},
             eval_accumulation_steps=1,
@@ -508,7 +551,7 @@ class LieDetectionSFT:
                 "xla_fsdp_grad_ckpt": False
             } if self.args.use_fsdp else None,
             deepspeed=self.args.deepspeed_config if self.args.use_deepspeed else None,
-            optim="adamw_torch", #adamw_torch" if not self.args.use_deepspeed else "adamw",
+            optim="adamw_torch",
             adam_beta1=0.9,
             adam_beta2=0.999,
             adam_epsilon=1e-8,
@@ -524,46 +567,51 @@ class LieDetectionSFT:
             data_collator=data_collator,
         )
 
-        # Log GPU utilization before training
-        if torch.cuda.is_available():
+        # Log GPU utilization before training (only on main process)
+        if torch.cuda.is_available() and self.is_main:
             for i in range(torch.cuda.device_count()):
                 logger.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
                 logger.info(f"  Memory: {torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB")
 
         # Train
-        logger.info("Starting training...")
+        if self.is_main:
+            logger.info("Starting training...")
         trainer.train()
 
-        # Save final model
+        # Save final model (trainer handles distributed saving properly)
         trainer.save_model(self.model_dir / "final")
-        tokenizer.save_pretrained(self.model_dir / "final")
+        if self.is_main:
+            tokenizer.save_pretrained(self.model_dir / "final")
 
         # Final evaluation with error handling
-        logger.info("Running final evaluation...")
+        if self.is_main:
+            logger.info("Running final evaluation...")
         try:
             eval_results = trainer.evaluate()
         except RuntimeError as e:
-            logger.warning(f"Evaluation failed with error: {e}")
-            logger.info("Skipping final evaluation due to device mismatch. Model training completed successfully.")
+            if self.is_main:
+                logger.warning(f"Evaluation failed with error: {e}")
+                logger.info("Skipping final evaluation due to device mismatch. Model training completed successfully.")
             eval_results = {"eval_loss": "skipped due to multi-GPU evaluation issue"}
 
-        # Save results
-        results = {
-            "timestamp": self.timestamp,
-            "model": self.args.model,
-            "experiment": self.args.experiment,
-            "eval_results": eval_results,
-            "training_completed": True,
-            "final_train_loss": trainer.state.log_history[-1].get('loss',
-                                                                  'N/A') if trainer.state.log_history else 'N/A',
-            "wandb_url": wandb.run.get_url() if wandb.run else None
-        }
+        # Save results (only on main process)
+        if self.is_main:
+            results = {
+                "timestamp": self.timestamp,
+                "model": self.args.model,
+                "experiment": self.args.experiment,
+                "eval_results": eval_results,
+                "training_completed": True,
+                "final_train_loss": trainer.state.log_history[-1].get('loss',
+                                                                      'N/A') if trainer.state.log_history else 'N/A',
+                "wandb_url": wandb.run.get_url() if wandb.run else None
+            }
 
-        with open(self.run_dir / "results.json", 'w') as f:
-            json.dump(results, f, indent=2)
+            with open(self.run_dir / "results.json", 'w') as f:
+                json.dump(results, f, indent=2)
 
-        logger.info(f"Training complete! Results saved to: {self.run_dir}")
-        wandb.finish()
+            logger.info(f"Training complete! Results saved to: {self.run_dir}")
+            wandb.finish()
 
 
 def main():
@@ -614,13 +662,13 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=16,  # Reduced from 64 due to OOM
+        default=16,
         help="Training batch size per device. Use -1 for auto-detection."
     )
     parser.add_argument(
         "--target-batch-size",
         type=int,
-        default=256,  # Reduced from 512
+        default=256,
         help="Target total batch size (will adjust gradient accumulation)"
     )
     parser.add_argument(

@@ -1,6 +1,6 @@
 """Task definitions for off-policy lie detection evaluation."""
 
-from typing import Optional
+from typing import Optional, List
 
 from inspect_ai import task, Task, eval
 
@@ -8,6 +8,7 @@ from pipelines.offpolicy.doluschat.dataset import doluschat_dataset
 from pipelines.offpolicy.solver import offpolicy_passthrough_solver
 from pipelines.offpolicy.hook import OffPolicyHook
 from pipelines.offpolicy.truth_is_universal.dataset import truth_is_universal_dataset
+from pipelines.offpolicy.halueval.dataset import halueval_dataset
 
 
 @task
@@ -68,9 +69,37 @@ def truth_is_universal_task(
         #hooks=[OffPolicyHook()]
     )
 
+@task
+def halueval_task(
+    subsets: Optional[List[str]] = None,
+    limit: Optional[int] = None,
+) -> Task:
+    """
+    HaluEval off-policy task for hallucination detection evaluation.
+    
+    Args:
+        subsets: List of HaluEval subsets to use (e.g., ["dialogue", "qa"])
+                If None, uses default subsets
+        limit: Maximum samples per subset
+        
+    Returns:
+        Passthrough task for HaluEval dataset
+    """
+    
+    return Task(
+        name="off-policy_halueval",
+        dataset=halueval_dataset(
+            subsets=subsets,
+            limit=limit
+        ),
+        solver=offpolicy_passthrough_solver(),
+        scorer=[],
+        hooks=[OffPolicyHook()]
+    )
+
 if __name__ == "__main__":
     results = eval(
-        tasks=[truth_is_universal_task(), doluschat_task()],
+        tasks=[halueval_task()],#[truth_is_universal_task(), doluschat_task(), halueval_task()],
         #model=["openai/gpt-4o"],
         model=["openrouter/google/gemma-3-4b-it",
                "openrouter/google/gemma-3-12b-it",
