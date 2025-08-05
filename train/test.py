@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
 Test script for evaluating fine-tuned lie detection models.
-Reuses the comprehensive_evaluation function from evaluate.py
+Automatically discovers and tests all models for a given experiment.
 
 Usage:
-    python test.py --model-dir runs/sft_20250805_051447/models/final --test-folds ascii,games
+    # Test all models for an experiment
+    python test.py --experiment bundled_games_ascii_chat --test-folds ascii,games
+
+    # Test a specific model
+    python test.py --model-dir experiments/bundled_games_ascii_chat/runs/sft_20250805_051447/models/final --test-folds ascii,games
 """
 
 import argparse
@@ -14,7 +18,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -39,6 +43,45 @@ logger = logging.getLogger(__name__)
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 
+def discover_trained_models(experiment_name: str) -> List[Path]:
+    """Discover all trained models for a given experiment."""
+    experiment_dir = Path("experiments") / experiment_name
+    models = []
+
+    if not experiment_dir.exists():
+        logger.warning(f"Experiment directory not found: {experiment_dir}")
+        return models
+
+    runs_dir = experiment_dir / "runs"
+    if not runs_dir.exists():
+        logger.warning(f"No runs directory found for experiment: {experiment_name}")
+        return models
+
+    # Find all run directories
+    for run_dir in sorted(runs_dir.iterdir()):
+        if run_dir.is_dir() and run_dir.name.startswith("sft_"):
+            # Check for final model
+            final_model_path = run_dir / "models" / "final"
+            if final_model_path.exists():
+                # Verify it has necessary files (adapter_config.json for LoRA or config.json for full)
+                if (final_model_path / "adapter_config.json").exists() or \
+                        (final_model_path / "config.json").exists():
+                    models.append(final_model_path)
+                    logger.info(f"Found model: {final_model_path}")
+
+            # Also check for checkpoint directories
+            models_dir = run_dir / "models"
+            if models_dir.exists():
+                for checkpoint in sorted(models_dir.iterdir()):
+                    if checkpoint.is_dir() and checkpoint.name.startswith("checkpoint-"):
+                        if (checkpoint / "adapter_config.json").exists() or \
+                                (checkpoint / "config.json").exists():
+                            models.append(checkpoint)
+                            logger.info(f"Found checkpoint: {checkpoint}")
+
+    return models
+
+
 def load_fold_data(data_path: Path, fold_names: List[str], filename="train.jsonl") -> List[Dict]:
     """Load test data from specified folds."""
     all_data = []
@@ -46,7 +89,7 @@ def load_fold_data(data_path: Path, fold_names: List[str], filename="train.jsonl
     for fold_name in fold_names:
         fold_dir = data_path / fold_name
 
-        # Look for test.jsonl
+        # Look for the specified file
         test_file = fold_dir / filename
         if test_file.exists():
             with open(test_file, 'r') as f:
@@ -55,10 +98,10 @@ def load_fold_data(data_path: Path, fold_names: List[str], filename="train.jsonl
                     if line.strip():
                         item = json.loads(line)
                         fold_data.append(item)
-                logger.info(f"Loaded {fold_name}/test.jsonl: {len(fold_data)} samples")
+                logger.info(f"Loaded {fold_name}/{filename}: {len(fold_data)} samples")
                 all_data.extend(fold_data)
         else:
-            logger.warning(f"No train.jsonl found in {fold_name}")
+            logger.warning(f"No {filename} found in {fold_name}")
 
     return all_data
 
@@ -130,8 +173,25 @@ def load_model_and_tokenizer(model_dir: Path, base_model: Optional[str] = None):
         base_model_name = adapter_config.get("base_model_name_or_path", base_model)
 
         if not base_model_name:
-            base_model_name = "google/gemma-3-4b-it"
-            logger.warning(f"Base model not found in adapter config, using: {base_model_name}")
+            # Try to infer from parent directories or metadata
+            # Check if there's a metadata file in the run directory
+            run_dir = model_dir.parent.parent  # Go up to run directory
+            metadata_file = run_dir / "data" / "metadata.json"
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                    model_id = metadata.get("model", "")
+                    # Map common model identifiers
+                    model_mapping = {
+                        'google/gemma-3-4b-it': 'google/gemma-3-4b-it',
+                        'google/gemma-3-12b-it': 'google/gemma-3-12b-it',
+                        'google/gemma-3-27b-it': 'google/gemma-3-27b-it',
+                    }
+                    base_model_name = model_mapping.get(model_id, model_id)
+
+            if not base_model_name:
+                base_model_name = "google/gemma-3-4b-it"
+                logger.warning(f"Base model not found, defaulting to: {base_model_name}")
 
         logger.info(f"Loading base model: {base_model_name}")
 
@@ -172,18 +232,102 @@ def load_model_and_tokenizer(model_dir: Path, base_model: Optional[str] = None):
     return model, tokenizer
 
 
+def test_single_model(model_dir: Path, test_data: List[Dict], args) -> Dict:
+    """Test a single model and return results."""
+    logger.info(f"\nTesting model: {model_dir}")
+
+    # Load model and tokenizer
+    model, tokenizer = load_model_and_tokenizer(model_dir, args.base_model)
+
+    # Get token IDs for A and B
+    a_id = tokenizer.encode("A", add_special_tokens=False)[0]
+    b_id = tokenizer.encode("B", add_special_tokens=False)[0]
+    logger.info(f"Token IDs - A: {a_id}, B: {b_id}")
+
+    # Run comprehensive evaluation
+    metrics = comprehensive_evaluation(model, tokenizer, test_data, "TEST", a_id, b_id)
+
+    # Count lies vs truths
+    num_lies = sum(1 for item in test_data if item["completion"] == "A")
+    num_truths = len(test_data) - num_lies
+
+    # Prepare results
+    results = {
+        "model_path": str(model_dir),
+        "model_name": model_dir.name,
+        "n_samples": len(test_data),
+        "n_lies": num_lies,
+        "n_truths": num_truths,
+        "metrics": {
+            "accuracy": metrics['accuracy'],
+            "f1_score": metrics['macro_f1'],
+            "precision": {
+                "macro": metrics['macro_precision'],
+                "per_class": {
+                    "lie": metrics['a_precision'],
+                    "truth": metrics['b_precision']
+                }
+            },
+            "recall": {
+                "macro": metrics['macro_recall'],
+                "per_class": {
+                    "lie": metrics['a_recall'],
+                    "truth": metrics['b_recall']
+                }
+            },
+            "f1": {
+                "macro": metrics['macro_f1'],
+                "weighted": metrics['weighted_f1'],
+                "per_class": {
+                    "lie": metrics['a_f1'],
+                    "truth": metrics['b_f1']
+                }
+            },
+            "confusion_matrix": {
+                "true_negatives": metrics['true_negatives'],
+                "false_positives": metrics['false_positives'],
+                "false_negatives": metrics['false_negatives'],
+                "true_positives": metrics['true_positives']
+            },
+            "confidence": {
+                "mean": metrics['mean_confidence'],
+                "mean_lie_prob": metrics['mean_a_prob'],
+                "mean_truth_prob": metrics['mean_b_prob']
+            },
+            "per_class_accuracy": {
+                "lie": metrics['a_accuracy'],
+                "truth": metrics['b_accuracy']
+            }
+        }
+    }
+
+    # Clean up model to free memory
+    del model
+    torch.cuda.empty_cache()
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Test fine-tuned lie detection models",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument(
+    # Model selection arguments (mutually exclusive)
+    model_group = parser.add_mutually_exclusive_group(required=True)
+    model_group.add_argument(
+        "--experiment",
+        type=str,
+        help="Experiment name to test all models from (e.g., bundled_games_ascii_chat)"
+    )
+    model_group.add_argument(
         "--model-dir",
         type=str,
-        required=True,
-        help="Path to the fine-tuned model directory"
+        help="Path to a specific model directory to test"
     )
+
+    # Test data arguments
     parser.add_argument(
         "--test-folds",
         type=str,
@@ -193,9 +337,8 @@ def main():
     parser.add_argument(
         "--test-fold-file",
         type=str,
-        required=False,
         default="train.jsonl",
-        help="Whether to load in train.jsonl / val.jsonl etc"
+        help="File to load from each fold (train.jsonl, val.jsonl, etc.)"
     )
     parser.add_argument(
         "--data-dir",
@@ -203,29 +346,44 @@ def main():
         default="../.data/google/gemma_3_4b_it",
         help="Base directory containing test data"
     )
+
+    # Model configuration
     parser.add_argument(
         "--base-model",
         type=str,
         help="Base model name (for LoRA models, if not in adapter config)"
     )
+
+    # Output arguments
     parser.add_argument(
-        "--output",
+        "--output-dir",
         type=str,
-        default="test_results.json",
-        help="Output file for results (use 'none' to skip JSON output)"
+        default="test_results",
+        help="Directory to save test results"
+    )
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        choices=["json", "csv", "both"],
+        default="json",
+        help="Output format for results"
     )
 
     args = parser.parse_args()
 
-    # Load model and tokenizer
-    logger.info("Loading model and tokenizer...")
-    model_dir = Path(args.model_dir)
-    model, tokenizer = load_model_and_tokenizer(model_dir, args.base_model)
-
-    # Get token IDs for A and B
-    a_id = tokenizer.encode("A", add_special_tokens=False)[0]
-    b_id = tokenizer.encode("B", add_special_tokens=False)[0]
-    logger.info(f"Token IDs - A: {a_id}, B: {b_id}")
+    # Determine models to test
+    if args.experiment:
+        logger.info(f"Discovering models for experiment: {args.experiment}")
+        model_dirs = discover_trained_models(args.experiment)
+        if not model_dirs:
+            logger.error(f"No trained models found for experiment: {args.experiment}")
+            sys.exit(1)
+        logger.info(f"Found {len(model_dirs)} models to test")
+    else:
+        model_dirs = [Path(args.model_dir)]
+        if not model_dirs[0].exists():
+            logger.error(f"Model directory not found: {args.model_dir}")
+            sys.exit(1)
 
     # Load test data
     data_path = Path(args.data_dir)
@@ -249,114 +407,133 @@ def main():
     num_truths = len(test_data) - num_lies
     logger.info(f"Test set composition: {num_lies} lies, {num_truths} truths")
 
-    # Run comprehensive evaluation
-    logger.info("Running comprehensive evaluation...")
-    metrics = comprehensive_evaluation(model, tokenizer, test_data, "TEST", a_id, b_id)
+    # Test each model
+    all_results = []
+    for model_dir in model_dirs:
+        try:
+            results = test_single_model(model_dir, test_data, args)
+            all_results.append(results)
+        except Exception as e:
+            logger.error(f"Failed to test model {model_dir}: {e}")
+            continue
 
-    # Prepare results
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results = {
-        "timestamp": timestamp,
-        "model_dir": str(args.model_dir),
-        "test_folds": test_folds,
-        "n_samples": len(test_data),
-        "n_lies": num_lies,
-        "n_truths": num_truths,
-        "metrics": {
-            # Basic metrics
-            "accuracy": metrics['accuracy'],
-            "f1_score": metrics['macro_f1'],
-            "auroc": 0.0,  # Would need probability scores for this
-
-            # Detailed metrics
-            "precision": {
-                "macro": metrics['macro_precision'],
-                "micro": metrics['micro_precision'],
-                "weighted": metrics['weighted_precision'],
-                "per_class": {
-                    "lie": metrics['a_precision'],
-                    "truth": metrics['b_precision']
-                }
-            },
-            "recall": {
-                "macro": metrics['macro_recall'],
-                "micro": metrics['micro_recall'],
-                "weighted": metrics['weighted_recall'],
-                "per_class": {
-                    "lie": metrics['a_recall'],
-                    "truth": metrics['b_recall']
-                }
-            },
-            "f1": {
-                "macro": metrics['macro_f1'],
-                "micro": metrics['micro_f1'],
-                "weighted": metrics['weighted_f1'],
-                "per_class": {
-                    "lie": metrics['a_f1'],
-                    "truth": metrics['b_f1']
-                }
-            },
-            "confusion_matrix": {
-                "true_negatives": metrics['true_negatives'],
-                "false_positives": metrics['false_positives'],
-                "false_negatives": metrics['false_negatives'],
-                "true_positives": metrics['true_positives'],
-                "matrix": metrics['confusion_matrix']
-            },
-            "confidence": {
-                "mean": metrics['mean_confidence'],
-                "mean_lie_prob": metrics['mean_a_prob'],
-                "mean_truth_prob": metrics['mean_b_prob']
-            },
-            "per_class_accuracy": {
-                "lie": metrics['a_accuracy'],
-                "truth": metrics['b_accuracy']
-            }
-        },
-        "predictions_distribution": {
-            "predicted_lies": metrics['a_predictions'],
-            "predicted_truths": metrics['b_predictions']
-        }
-    }
+    # Create output directory
+    output_dir = Path(args.output_dir)
+    if args.experiment:
+        output_dir = output_dir / args.experiment
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save results
-    if args.output.lower() != 'none':
-        # Convert numpy types to Python native types for JSON serialization
-        def convert_to_native(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {k: convert_to_native(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_to_native(item) for item in obj]
-            return obj
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        results_native = convert_to_native(results)
+    # Convert numpy types to Python native types for JSON serialization
+    def convert_to_native(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_native(item) for item in obj]
+        return obj
 
-        with open(args.output, 'w') as f:
-            json.dump(results_native, f, indent=2)
-        logger.info(f"Results saved to: {args.output}")
+    # Prepare combined results
+    combined_results = {
+        "timestamp": timestamp,
+        "experiment": args.experiment if args.experiment else "single_model",
+        "test_folds": test_folds,
+        "test_fold_file": args.test_fold_file,
+        "n_models_tested": len(all_results),
+        "test_set": {
+            "n_samples": len(test_data),
+            "n_lies": num_lies,
+            "n_truths": num_truths
+        },
+        "models": convert_to_native(all_results)
+    }
+
+    # Save JSON results
+    if args.output_format in ["json", "both"]:
+        json_file = output_dir / f"test_results_{timestamp}.json"
+        with open(json_file, 'w') as f:
+            json.dump(combined_results, f, indent=2)
+        logger.info(f"Results saved to: {json_file}")
+
+    # Save CSV results
+    if args.output_format in ["csv", "both"]:
+        import csv
+        csv_file = output_dir / f"test_results_{timestamp}.csv"
+
+        with open(csv_file, 'w', newline='') as f:
+            if all_results:
+                # Flatten the results for CSV
+                fieldnames = [
+                    'model_path', 'model_name', 'accuracy', 'macro_f1', 'weighted_f1',
+                    'lie_precision', 'lie_recall', 'lie_f1', 'lie_accuracy',
+                    'truth_precision', 'truth_recall', 'truth_f1', 'truth_accuracy',
+                    'mean_confidence', 'n_samples'
+                ]
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for result in all_results:
+                    row = {
+                        'model_path': result['model_path'],
+                        'model_name': result['model_name'],
+                        'accuracy': result['metrics']['accuracy'],
+                        'macro_f1': result['metrics']['f1_score'],
+                        'weighted_f1': result['metrics']['f1']['weighted'],
+                        'lie_precision': result['metrics']['precision']['per_class']['lie'],
+                        'lie_recall': result['metrics']['recall']['per_class']['lie'],
+                        'lie_f1': result['metrics']['f1']['per_class']['lie'],
+                        'lie_accuracy': result['metrics']['per_class_accuracy']['lie'],
+                        'truth_precision': result['metrics']['precision']['per_class']['truth'],
+                        'truth_recall': result['metrics']['recall']['per_class']['truth'],
+                        'truth_f1': result['metrics']['f1']['per_class']['truth'],
+                        'truth_accuracy': result['metrics']['per_class_accuracy']['truth'],
+                        'mean_confidence': result['metrics']['confidence']['mean'],
+                        'n_samples': result['n_samples']
+                    }
+                    writer.writerow(row)
+
+        logger.info(f"CSV results saved to: {csv_file}")
 
     # Print summary
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 80)
     print(f"TEST RESULTS SUMMARY")
-    print("=" * 60)
-    print(f"Model: {args.model_dir}")
+    print("=" * 80)
+    if args.experiment:
+        print(f"Experiment: {args.experiment}")
+    print(f"Models tested: {len(all_results)}")
     print(f"Test folds: {', '.join(test_folds)}")
     print(f"Total samples: {len(test_data)} ({num_lies} lies, {num_truths} truths)")
-    print("-" * 60)
-    print(f"Overall Accuracy: {metrics['accuracy']:.3f}")
-    print(f"Macro F1 Score:   {metrics['macro_f1']:.3f}")
-    print(f"Weighted F1:      {metrics['weighted_f1']:.3f}")
-    print("-" * 60)
-    print("Per-Class Performance:")
-    print(f"  Lies (A):   Acc={metrics['a_accuracy']:.3f}, F1={metrics['a_f1']:.3f}")
-    print(f"  Truths (B): Acc={metrics['b_accuracy']:.3f}, F1={metrics['b_f1']:.3f}")
-    print("=" * 60)
+    print("-" * 80)
+
+    # Print individual model results
+    for i, result in enumerate(all_results, 1):
+        print(f"\nModel {i}: {result['model_name']}")
+        print(f"  Path: {result['model_path']}")
+        print(f"  Overall Accuracy: {result['metrics']['accuracy']:.3f}")
+        print(f"  Macro F1 Score:   {result['metrics']['f1_score']:.3f}")
+        print(f"  Weighted F1:      {result['metrics']['f1']['weighted']:.3f}")
+        print(f"  Per-Class Performance:")
+        print(f"    Lies:   Acc={result['metrics']['per_class_accuracy']['lie']:.3f}, "
+              f"F1={result['metrics']['f1']['per_class']['lie']:.3f}")
+        print(f"    Truths: Acc={result['metrics']['per_class_accuracy']['truth']:.3f}, "
+              f"F1={result['metrics']['f1']['per_class']['truth']:.3f}")
+
+    # If multiple models, show best performer
+    if len(all_results) > 1:
+        print("\n" + "-" * 80)
+        best_model = max(all_results, key=lambda x: x['metrics']['accuracy'])
+        print(f"Best Model (by accuracy): {best_model['model_name']}")
+        print(f"  Accuracy: {best_model['metrics']['accuracy']:.3f}")
+        print(f"  Macro F1: {best_model['metrics']['f1_score']:.3f}")
+
+    print("=" * 80)
 
 
 if __name__ == "__main__":
