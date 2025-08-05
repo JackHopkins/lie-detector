@@ -3,7 +3,7 @@
 
 This downloads the data from S3 and constructs balanced, trainable subsets/folds.
 ```
-# We download datasets from S3 and balance them
+# Download raw datasets from S3, aggregate them into folds, and balance them
 python -m prep.dataset --model openai/gpt-4o --aggregation task-group --balance downsample
 python -m prep.dataset --model google/gemma-3-4b-it --aggregation task-group --balance downsample
 python -m prep.dataset --model google/gemma-3-12b-it --aggregation task-group --balance downsample
@@ -13,11 +13,38 @@ python -m prep.dataset --model google/gemma-3-27b-it --aggregation task-group --
 python -m prep.dataset --model google/gemma-3-4b-it --verify
 ```
 
-# Prepare for Training
+# Create an experiment 
 ```
-python -m prep.bundle --model google/gemma-3-4b-it --format chat --train games --train ascii
+python -m prep.bundle \
+	--dataset .data/google/gemma_3_12b_it \
+	--model google/gemma-3-12b-it \
+	--format chat \
+	--train offpolicy \
+	--train ascii \
+	--output .train \
+	--max-train-examples 64 \
+	--max-eval-examples 128
+	
+python -m prep.bundle \
+	--dataset .data/google/gemma_3_12b_it \
+	--model google/gemma-3-12b-it \
+	--format chat \
+	--train offpolicy
 ```
 
+# SFT a model
+```
+python -m train.sft --model google/gemma-3-12b-it --experiment bundled_offpolicy_chat --data-dir ./bundled_data
+```
+
+# Test the model
+```
+python -m test \
+    --model-dir runs/sft_20250805_051447/models/final \
+    --test-folds ascii  \
+    --output /dev/null \
+    --test-fold-file train.jsonl
+```
 # Baselines
 
 TODO

@@ -66,8 +66,8 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="./bundled_data",
-        help="Output directory path (default: ./bundled_data)"
+        default="./experiment",
+        help="Output directory path (default: ./experiment)"
     )
     
     parser.add_argument(

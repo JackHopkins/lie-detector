@@ -53,3 +53,4 @@ __pycache__
 /common/misc/deduplicated_samples_embeddings.npy
 /common/misc/generated_sandbagging_samples_10000_gpt.json
 /common/misc/generated_sandbagging_samples_temp_3529.json
+/.train/
