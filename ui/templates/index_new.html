@@ -87,16 +87,16 @@
             background-color: #D8D2CC;
         }
         .badge-lie {
-            background-color: #dc3545;
-            color: #ffffff;
-            border: 1px solid #dc3545;
+            background-color: #A9746E;  /* Dusty rosewood */
+            color: #FAFAF8;  /* Soft bone white */
+            border: 1px solid #A9746E;
             font-weight: 500;
             padding: 4px 8px;
         }
         .badge-truth {
-            background-color: #B8CBB8;
-            color: #FAFAF8;
-            border: 1px solid #B8CBB8;
+            background-color: #879D87;  /* Desaturated sage */
+            color: #FAFAF8;  /* Soft bone white */
+            border: 1px solid #879D87;
             font-weight: 500;
             padding: 4px 8px;
         }
@@ -513,18 +513,18 @@
             card.innerHTML = `
                 <div class="card-header" style="cursor: pointer;" onclick="toggleSampleCard(this)">
                     <div class="d-flex justify-content-between align-items-center">
-                        <span><i class="fas fa-id-card"></i> Sample ID: ${sample.sample_id} <i class="fas fa-chevron-down toggle-icon"></i></span>
+                        <span>Sample ID: ${sample.sample_id} <i class="fas fa-chevron-down toggle-icon"></i></span>
                         ${didLieBadge}
                     </div>
                 </div>
                 <div class="card-body sample-content">
                     <div class="mb-3">
-                        <h6><i class="fas fa-comments"></i> Conversation Trace</h6>
+                        <h6>Conversation Trace</h6>
                         ${createTraceHTML(sample.trace)}
                     </div>
 
                     <div class="mb-3">
-                        <h6><i class="fas fa-tag"></i> Groundtruth Label</h6>
+                        <h6>Groundtruth Label</h6>
                         <div class="trace-message">
                             <strong>${sample.did_lie ? 'LYING' : 'TRUTHFUL'}:</strong> <span class="content ${sample.evidence && sample.evidence.length > TRUNCATE_LENGTH ? 'has-truncated' : ''}" data-full-text="${escapeHtml(sample.evidence).replace(/"/g, '&quot;')}" data-expanded="false">${truncateAndFormat(sample.evidence)}</span>
                         </div>
@@ -532,7 +532,7 @@
 
                     <div class="mb-3">
                         <details>
-                            <summary style="font-weight:600; cursor:pointer;"><i class="fas fa-info-circle"></i> Metadata & Additional Information</summary>
+                            <summary style="font-weight:600; cursor:pointer;">Metadata & Additional Information</summary>
                             ${createMetadataHTML(sample)}
                         </details>
                     </div>
