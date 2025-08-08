@@ -4,7 +4,6 @@
 This downloads the data from S3 and constructs balanced, trainable subsets/folds.
 ```
 # Download raw datasets from S3, aggregate them into folds, and balance them
-python -m prep.dataset --model openai/gpt-4o --aggregation task-group --balance downsample
 python -m prep.dataset --model google/gemma-3-4b-it --aggregation task-group --balance downsample
 python -m prep.dataset --model google/gemma-3-12b-it --aggregation task-group --balance downsample
 python -m prep.dataset --model google/gemma-3-27b-it --aggregation task-group --balance downsample
@@ -14,8 +13,9 @@ python -m prep.dataset --model google/gemma-3-4b-it --verify
 ```
 
 # Create an experiment 
+This bundles folds together and creates an experiment, which will be associated with trained models.
 ```
-python -m prep.bundle \
+python -m prep.experiment \
 	--dataset .data/google/gemma_3_12b_it \
 	--model google/gemma-3-12b-it \
 	--format chat \
@@ -25,7 +25,7 @@ python -m prep.bundle \
 	--max-train-examples 64 \
 	--max-eval-examples 128
 	
-python -m prep.bundle \
+python -m prep.experiment \
 	--dataset .data/google/gemma_3_12b_it \
 	--model google/gemma-3-12b-it \
 	--format chat \
@@ -35,9 +35,21 @@ python -m prep.bundle \
 # SFT a model
 ```
 python -m train.sft --model google/gemma-3-12b-it --experiment bundled_offpolicy_chat --data-dir ./bundled_data
+
+torchrun \
+    --nproc_per_node=8 train/sft.py \
+    --model google/gemma-3-12b-it \
+    --experiment bundled_offpolicy_games_chat \
+    --batch-size 16 \
+    --epochs 10 \
+    --size 2048
 ```
 
 # Test the model
+
+```
+python -m train.test --experiment bundled_offpolicy_chat --test-folds ascii,games --data-dir .data/google/gemma_3_12b_it
+```
 ```
 python -m test \
     --model-dir runs/sft_20250805_051447/models/final \
@@ -45,6 +57,13 @@ python -m test \
     --output /dev/null \
     --test-fold-file train.jsonl
 ```
+
+# Putting it all together
+
+python -m prep.experiment --dataset .data/google/gemma_3_12b_it --model google/gemma-3-12b-it --format chat --train offpolicy --train games
+python -m train.sft --model google/gemma-3-12b-it --experiment bundled_offpolicy_games_chat --data-dir ./bundled_data --max-length 3000
+python -m train.test --experiment bundled_offpolicy_games_chat --test-folds ascii --data-dir .data/google/gemma_3_12b_it --size 512
+
 # Baselines
 
 TODO

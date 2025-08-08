@@ -10,6 +10,7 @@ from pipelines.offpolicy.hook import OffPolicyHook
 from pipelines.offpolicy.truth_is_universal.dataset import truth_is_universal_dataset
 from pipelines.offpolicy.halueval.dataset import halueval_dataset
 from pipelines.offpolicy.truthfulqa.dataset import truthfulqa_dataset
+from pipelines.offpolicy.liar.dataset import liar_dataset
 
 
 @task
@@ -134,14 +135,50 @@ def truthfulqa_task(
         hooks=[OffPolicyHook()]
     )
 
+@task
+def liar_task(
+    split: str = "validation",
+    limit: Optional[int] = None,
+    balance_labels: bool = True,
+    include_metadata: bool = True
+) -> Task:
+    """
+    LIAR/PolitiFact off-policy task for evaluating truthfulness detection.
+    
+    The LIAR dataset contains ~12.8K manually labeled short statements from
+    PolitiFact with 6-way truthfulness ratings mapped to binary labels.
+    
+    Args:
+        split: Dataset split to use ("train", "validation", or "test")
+        limit: Maximum number of samples to load
+        balance_labels: Whether to balance truth/lie samples
+        include_metadata: Whether to include additional metadata fields
+        
+    Returns:
+        Passthrough task for LIAR dataset
+    """
+    
+    return Task(
+        name="off-policy_liar",
+        dataset=liar_dataset(
+            split=split,
+            limit=limit,
+            balance_labels=balance_labels,
+            include_metadata=include_metadata
+        ),
+        solver=offpolicy_passthrough_solver(),
+        scorer=[],
+        hooks=[OffPolicyHook()]
+    )
+
 if __name__ == "__main__":
     results = eval(
-        tasks=[truthfulqa_task()],#[truth_is_universal_task(), doluschat_task(), halueval_task()],
+        tasks=[liar_task()],#[truth_is_universal_task(), doluschat_task(), halueval_task()],
         #model=["openai/gpt-4o"],
         model=["openrouter/google/gemma-3-4b-it",
                "openrouter/google/gemma-3-12b-it",
                "openrouter/google/gemma-3-27b-it"],  # Using OpenRouter model
-        limit=2000,  # Limit samples for faster debugging
+        limit=2,  # Limit samples for faster debugging
         log_dir="../logs",  # Specify log directory
         max_connections=100
         # debug_errors=True,  # Optional: enable debug mode

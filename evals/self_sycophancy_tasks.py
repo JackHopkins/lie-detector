@@ -3,7 +3,6 @@ import sys
 
 from inspect_ai import task, Task, eval
 
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.generalization_enums import MotivationFramework, KnowledgeFramework
@@ -12,12 +11,14 @@ from common.generalization_enums import MotivationFramework, KnowledgeFramework
 from pipelines.selfsycophancy.harmfulness.dataset import ethics_preference_dataset
 from pipelines.selfsycophancy.harmfulness.solvers import harmfulness_sycophancy_solver
 from pipelines.selfsycophancy.harmfulness.scorers import harmfulness_distribution_sycophancy_scorer, \
-    harmfulness_distribution_skepticism_scorer, risk_uncertainty_shift_scorer, significant_sycophancy_scorer
+    harmfulness_distribution_skepticism_scorer, risk_uncertainty_shift_scorer, significant_sycophancy_scorer, \
+    risk_shift_valence_scorer, risk_mass_migration_valence_scorer
 
 # Correctness imports
 from pipelines.selfsycophancy.correctness.dataset import science_math_dataset, arc_challenge_dataset
 from pipelines.selfsycophancy.correctness.scorers import (
-    confidence_shift_scorer, distribution_based_sycophancy_scorer, significant_sycophancy_scorer
+    confidence_shift_scorer, distribution_based_sycophancy_scorer, significant_sycophancy_scorer,
+    distribution_divergence_valence_scorer, correctness_shift_valence_scorer, confidence_evolution_valence_scorer
 )
 from pipelines.selfsycophancy.correctness.solvers import science_math_sycophancy_solver
 from pipelines.selfsycophancy.hooks import SelfSycophancyHook
@@ -25,11 +26,18 @@ from pipelines.selfsycophancy.hooks import SelfSycophancyHook
 harmfulness_scorers =  [harmfulness_distribution_sycophancy_scorer(),
                         harmfulness_distribution_skepticism_scorer(),
                         risk_uncertainty_shift_scorer(),
-                        significant_sycophancy_scorer()]
+                        significant_sycophancy_scorer(),
+
+                        risk_shift_valence_scorer(),
+                        risk_mass_migration_valence_scorer()]
 
 correctness_scorers = [distribution_based_sycophancy_scorer(),
                        confidence_shift_scorer(),
-                       significant_sycophancy_scorer()]
+                       significant_sycophancy_scorer(),
+
+                       distribution_divergence_valence_scorer(),
+                       correctness_shift_valence_scorer(),
+                       confidence_evolution_valence_scorer()]
 
 @task
 def self_sycophancy_harmfulness_common_sense() -> Task:
@@ -43,6 +51,7 @@ def self_sycophancy_harmfulness_common_sense() -> Task:
             "motivation_framework": MotivationFramework.INTERNALIZED_DRIVE_TO_LIE,
             "knowledge_framework": KnowledgeFramework.INTROSPECTIVE_KNOWLEDGE
         }
+
     )
 
 
@@ -185,13 +194,14 @@ if __name__ == "__main__":
     #model = "openrouter/google/gemma-3-12b-it"
     #model = "openrouter/openai/gpt-4o"
 
-    model = "openrouter/google/gemma-3-12b-it"
-
+    model = ["openrouter/openai/gpt-oss-120b", "openrouter/openai/gpt-oss-20b"] #"openrouter/google/gemma-3-12b-it"
+    model = []
     results = eval(
         tasks=all_tasks,
         model=model,  # Using OpenRouter Claude model
-        limit=400,  # Limit samples for faster debugging
+        limit=100,  # Limit samples for faster debugging
         log_dir="../logs",  # Optional: specify log directory
-        retry_on_error=5
+        retry_on_error=5,
+        fail_on_error=0.2
         # debug_errors=True,  # Optional: enable debug mode
     )

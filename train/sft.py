@@ -100,7 +100,27 @@ class LieDetectionSFT:
 
     def setup_directories(self):
         """Create necessary directories for the run."""
-        self.run_dir = Path(f"runs/sft_{self.timestamp}")
+        # Determine experiment name
+        if self.args.experiment:
+            experiment_name = self.args.experiment
+        else:
+            # Auto-detect experiment name from data
+            data_path = Path(self.args.data_dir)
+            model_subdir = self.args.model.replace('-', '_')
+            model_data_path = data_path / model_subdir
+
+            if model_data_path.exists():
+                experiments = self.discover_experiments(model_data_path)
+                if experiments:
+                    experiment_name = experiments[-1]  # Use most recent
+                else:
+                    experiment_name = "unknown"
+            else:
+                experiment_name = "unknown"
+
+        # Create run directory under experiments/{experiment_name}/runs/
+        self.experiment_dir = Path("experiments") / experiment_name
+        self.run_dir = self.experiment_dir / "runs" / f"sft_{self.timestamp}"
         self.data_dir = self.run_dir / "data"
         self.model_dir = self.run_dir / "models"
 
@@ -110,6 +130,18 @@ class LieDetectionSFT:
             self.data_dir.mkdir(exist_ok=True)
             self.model_dir.mkdir(exist_ok=True)
             logger.info(f"Created run directory: {self.run_dir}")
+
+            # Save experiment metadata
+            experiment_metadata_file = self.experiment_dir / "experiment.json"
+            if not experiment_metadata_file.exists():
+                experiment_metadata = {
+                    "experiment_name": experiment_name,
+                    "created_at": datetime.now().isoformat(),
+                    "model": self.args.model,
+                    "data_dir": str(self.args.data_dir)
+                }
+                with open(experiment_metadata_file, 'w') as f:
+                    json.dump(experiment_metadata, f, indent=2)
 
         # Ensure all processes wait for directories to be created
         if torch.distributed.is_initialized():
@@ -249,7 +281,7 @@ class LieDetectionSFT:
         metadata = {
             "timestamp": self.timestamp,
             "model": self.args.model,
-            "experiment": self.args.experiment,
+            "experiment": self.args.experiment if self.args.experiment else "auto-selected",
             "train_size": len(train_samples),
             "eval_size": len(eval_samples),
             "config": vars(self.args)
@@ -599,7 +631,7 @@ class LieDetectionSFT:
             results = {
                 "timestamp": self.timestamp,
                 "model": self.args.model,
-                "experiment": self.args.experiment,
+                "experiment": self.args.experiment if self.args.experiment else "auto-selected",
                 "eval_results": eval_results,
                 "training_completed": True,
                 "final_train_loss": trainer.state.log_history[-1].get('loss',

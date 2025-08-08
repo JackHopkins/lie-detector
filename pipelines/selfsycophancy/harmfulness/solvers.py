@@ -30,7 +30,7 @@ def generate_additional_options() -> Solver:
         state.messages = [ChatMessageSystem(content=SYSTEM_PROMPT)]
 
         # Create prompt with original scenario and two options
-        scenario = f"{state.input_text}:\n1) {state.target.text}\n2) {state.metadata['rejected']}"
+        scenario = f"{state.input_text}:\n1) {state.target.text}\n2) {state.metadata['rejected']}\n3) "
         state.messages.append(ChatMessageUser(content=scenario))
 
         # Generate additional options
@@ -39,6 +39,7 @@ def generate_additional_options() -> Solver:
 
         # Parse the generated options
         response_text = model_output.choices[0].message.text
+        response_text = response_text
         options_pattern = r'(\d+)\)\s*(.+?)(?=\n\d+\)|$)'
         matches = re.findall(options_pattern, response_text, re.DOTALL)
 
@@ -56,7 +57,8 @@ def generate_additional_options() -> Solver:
         if len(all_options) < 4:
             # If generation failed, add placeholder options
             while len(all_options) < 4:
-                all_options.append(f"[Generated option {len(all_options) - 1}]")
+                #all_options.append(f"[Generated option {len(all_options) - 1}]")
+                raise Exception("No options generated")
 
         state.metadata['all_options'] = all_options[:4]  # Keep only first 4
 
@@ -65,48 +67,111 @@ def generate_additional_options() -> Solver:
     return solve
 
 
+# def extract_risk_logits(logprobs_data, response_text: str) -> Dict[int, Dict[str, float]]:
+#     """
+#     Extract logits for risk score tokens (1-10) from the logprobs data.
+#     """
+#     score_logits = {}
+#
+#     # Find all score patterns in the response
+#     score_pattern = r'Option\s*(\d+):\s*(\d+)/10'
+#     matches = list(re.finditer(score_pattern, response_text))
+#
+#     if not logprobs_data or not matches:
+#         return {}
+#
+#     # For each match, find the corresponding logprobs
+#     for match in matches:
+#         option_num = int(match.group(1))
+#         score_value = match.group(2)
+#         score_pos = match.start(2)  # Position of the score digit
+#
+#         # Find the token index corresponding to this position
+#         char_count = 0
+#         for i, token_data in enumerate(logprobs_data.content):
+#             token_length = len(token_data.token)
+#             if char_count <= score_pos < char_count + token_length:
+#                 # Extract logits for digits 1-10
+#                 digit_logits = {}
+#                 for top_logprob in token_data.top_logprobs:
+#                     if top_logprob.token.strip().isdigit():
+#                         try:
+#                             digit = int(top_logprob.token.strip())
+#                         except ValueError:
+#                             continue
+#
+#                         if 1 <= digit <= 10:
+#                             digit_logits[str(digit)] = top_logprob.logprob
+#
+#                 score_logits[option_num] = digit_logits
+#                 break
+#             char_count += token_length
+#
+#     return score_logits
 def extract_risk_logits(logprobs_data, response_text: str) -> Dict[int, Dict[str, float]]:
     """
-    Extract logits for risk score tokens (1-10) from the logprobs data.
+    Alternative approach: Extract logits by finding Option patterns in the token stream.
+    This is more robust to special tokens and formatting issues.
     """
     score_logits = {}
 
-    # Find all score patterns in the response
-    score_pattern = r'Option\s*(\d+):\s*(\d+)/10'
-    matches = list(re.finditer(score_pattern, response_text))
-
-    if not logprobs_data or not matches:
+    if not logprobs_data:
         return {}
 
-    # For each match, find the corresponding logprobs
-    for match in matches:
-        option_num = int(match.group(1))
-        score_value = match.group(2)
-        score_pos = match.start(2)  # Position of the score digit
+    # Look for patterns in the token stream
+    tokens = [token_data.token for token_data in logprobs_data.content]
 
-        # Find the token index corresponding to this position
-        char_count = 0
-        for i, token_data in enumerate(logprobs_data.content):
-            token_length = len(token_data.token)
-            if char_count <= score_pos < char_count + token_length:
-                # Extract logits for digits 1-10
-                digit_logits = {}
-                for top_logprob in token_data.top_logprobs:
-                    if top_logprob.token.strip().isdigit():
-                        try:
-                            digit = int(top_logprob.token.strip())
-                        except ValueError:
-                            continue
+    for i, token in enumerate(tokens):
+        # Look for "Option" followed by a number
+        if "Option" in token or token.strip() == "Option":
+            # Look ahead for the pattern "Option N: M/10"
+            option_num = None
 
-                        if 1 <= digit <= 10:
-                            digit_logits[str(digit)] = top_logprob.logprob
+            # Check next few tokens for the option number
+            for j in range(i + 1, min(i + 5, len(tokens))):
+                if tokens[j].strip().isdigit():
+                    option_num = int(tokens[j].strip())
+                    break
+                elif ":" in tokens[j]:
+                    # Sometimes "1:" might be a single token
+                    num_match = re.match(r'(\d+):', tokens[j])
+                    if num_match:
+                        option_num = int(num_match.group(1))
+                    break
 
-                score_logits[option_num] = digit_logits
-                break
-            char_count += token_length
+            if option_num:
+                # Now look for the score (should be shortly after)
+                for j in range(i + 1, min(i + 10, len(tokens))):
+                    token_data = logprobs_data.content[j]
+                    # Check if this token could be a score
+                    if token_data.token.strip().isdigit() or token_data.token.strip() == "10":
+                        # Check if the next token is "/" or if this token contains "/10"
+                        is_score = False
+                        if j + 1 < len(tokens) and "/" in tokens[j + 1]:
+                            is_score = True
+                        elif "/10" in token_data.token:
+                            is_score = True
+
+                        if is_score:
+                            # Extract logits for all possible scores
+                            digit_logits = {}
+                            for top_logprob in token_data.top_logprobs:
+                                token_str = top_logprob.token.strip()
+                                if token_str.isdigit():
+                                    try:
+                                        digit = int(token_str)
+                                        if 1 <= digit <= 10:
+                                            digit_logits[str(digit)] = top_logprob.logprob
+                                    except ValueError:
+                                        continue
+                                elif token_str == "10":
+                                    digit_logits["10"] = top_logprob.logprob
+
+                            if digit_logits:
+                                score_logits[option_num] = digit_logits
+                            break
 
     return score_logits
-
 
 def compute_risk_distribution_stats(dist: np.ndarray) -> Dict[str, float]:
     """
@@ -163,7 +228,7 @@ def initial_risk_assessment() -> Solver:
         state.messages.append(ChatMessageUser(content=options_text))
 
         # Generate risk assessment with logprobs
-        state = await generate(state, logprobs=True, top_logprobs=20)
+        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000)
 
 
         # Parse risk scores
@@ -237,7 +302,7 @@ def choice_and_reassessment() -> Solver:
         state.messages.append(ChatMessageUser(content=options_text + "\n\n" + CHOICE_PROMPT))
 
         # Generate choice and reassessment with logprobs
-        state = await generate(state, logprobs=True, top_logprobs=20)
+        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000)
 
         # Parse choice and new risk score
         response_text = state.output.completion
@@ -251,57 +316,197 @@ def choice_and_reassessment() -> Solver:
             state.metadata['chosen_option'] = chosen_option
             state.metadata['new_risk_score'] = new_risk_score
 
-            # Extract logits for the reassessment
+            # Extract logits for the reassessment using pattern-based approach
             if hasattr(state.output.choices[0], 'logprobs') and state.output.choices[0].logprobs:
                 logprobs = state.output.choices[0].logprobs
-                # Find the risk score position
-                score_pos = risk_match.start(1)
+                tokens = [token_data.token for token_data in logprobs.content]
 
-                # Extract logits
-                char_count = 0
-                for i, token_data in enumerate(logprobs.content):
-                    token_length = len(token_data.token)
-                    if char_count <= score_pos < char_count + token_length:
-                        # Extract logits for digits 1-10
-                        digit_logits = {}
-                        for top_logprob in token_data.top_logprobs:
-                            if top_logprob.token.strip().isdigit():
-                                try:
-                                    digit = int(top_logprob.token.strip())
-                                except ValueError:
-                                    continue
+                # Look for "Risk" pattern in the token stream
+                digit_logits = {}
+                for i, token in enumerate(tokens):
+                    # Look for "Risk" or "score" tokens
+                    if "Risk" in token or "risk" in token or "score" in token:
+                        # Look ahead for the score token (should be within next ~10 tokens)
+                        for j in range(i + 1, min(i + 15, len(tokens))):
+                            token_data = logprobs.content[j]
+                            token_str = token_data.token.strip()
 
-                                if 1 <= digit <= 10:
-                                    digit_logits[str(digit)] = top_logprob.logprob
+                            # Check if this token could be a score
+                            if token_str.isdigit() or token_str == "10":
+                                # Verify it's followed by "/" or contains "/10"
+                                is_score = False
+                                if j + 1 < len(tokens) and ("/" in tokens[j + 1] or "/10" in tokens[j + 1]):
+                                    is_score = True
+                                elif "/10" in token_data.token:
+                                    is_score = True
+                                # Sometimes the score might be right before "/10" without checking ahead
+                                elif j + 2 < len(tokens) and tokens[j + 1] == "/" and tokens[j + 2].startswith("10"):
+                                    is_score = True
 
-                        # Compute distribution and stats
+                                if is_score:
+                                    # Extract logits for all possible scores from this token
+                                    for top_logprob in token_data.top_logprobs:
+                                        prob_token = top_logprob.token.strip()
+                                        if prob_token.isdigit():
+                                            try:
+                                                digit = int(prob_token)
+                                                if 1 <= digit <= 10:
+                                                    digit_logits[str(digit)] = top_logprob.logprob
+                                            except ValueError:
+                                                continue
+                                        elif prob_token == "10":
+                                            digit_logits["10"] = top_logprob.logprob
+
+                                    # If we found the score logits, stop searching
+                                    if digit_logits:
+                                        break
+
+                        # If we found logits, stop the outer loop too
                         if digit_logits:
-                            full_logits = np.full(10, -100.0)
-                            for score_str, logit in digit_logits.items():
-                                try:
-                                    score = int(score_str)
-                                except ValueError:
-                                    continue
+                            break
 
-                                if 1 <= score <= 10:
-                                    full_logits[score - 1] = logit
+                # Alternative: If we didn't find it with "Risk", try looking for just the pattern "X/10"
+                if not digit_logits:
+                    for i in range(len(tokens) - 1):
+                        token_data = logprobs.content[i]
+                        token_str = token_data.token.strip()
 
-                            exp_logits = np.exp(full_logits - np.max(full_logits))
-                            dist = exp_logits / np.sum(exp_logits)
+                        # Check if this is a digit followed by "/"
+                        if token_str.isdigit() or token_str == "10":
+                            # Check if next token contains "/"
+                            if i + 1 < len(tokens) and ("/" in tokens[i + 1] or tokens[i + 1] == "/"):
+                                # And the token after that is "10" or contains "10"
+                                if i + 2 < len(tokens) and ("10" in tokens[i + 2]):
+                                    # This looks like our score!
+                                    for top_logprob in token_data.top_logprobs:
+                                        prob_token = top_logprob.token.strip()
+                                        if prob_token.isdigit():
+                                            try:
+                                                digit = int(prob_token)
+                                                if 1 <= digit <= 10:
+                                                    digit_logits[str(digit)] = top_logprob.logprob
+                                            except ValueError:
+                                                continue
+                                        elif prob_token == "10":
+                                            digit_logits["10"] = top_logprob.logprob
 
-                            state.metadata['new_risk_logits'] = digit_logits
-                            state.metadata['new_risk_distribution'] = dist.tolist()
-                            state.metadata['new_risk_stats'] = compute_risk_distribution_stats(dist)
-                        break
-                    char_count += token_length
+                                    if digit_logits:
+                                        break
+
+                # Compute distribution and stats if we found logits
+                if digit_logits:
+                    full_logits = np.full(10, -100.0)
+                    for score_str, logit in digit_logits.items():
+                        try:
+                            score = int(score_str)
+                            if 1 <= score <= 10:
+                                full_logits[score - 1] = logit
+                        except ValueError:
+                            continue
+
+                    exp_logits = np.exp(full_logits - np.max(full_logits))
+                    dist = exp_logits / np.sum(exp_logits)
+
+                    state.metadata['new_risk_logits'] = digit_logits
+                    state.metadata['new_risk_distribution'] = dist.tolist()
+                    state.metadata['new_risk_stats'] = compute_risk_distribution_stats(dist)
+                else:
+                    # Log warning if we couldn't find logits
+                    print(f"Warning: Could not extract risk score logits from response")
+                    # You might want to add some debug info here:
+                    # print(f"Response text: {response_text}")
+                    # print(f"Token stream sample: {tokens[:30]}")
         else:
             # Default values if parsing fails
             state.metadata['chosen_option'] = 1
             state.metadata['new_risk_score'] = 5
+            print(f"Warning: Could not parse choice or risk score from response: {response_text[:200]}")
 
         return state
 
     return solve
+
+# @solver
+# def choice_and_reassessment2() -> Solver:
+#     """Step 3: Have model choose an option and reassess its risk with logits"""
+#
+#     async def solve(state: TaskState, generate: Generate) -> TaskState:
+#         # Reset messages for new conversation
+#         state.messages = [ChatMessageSystem(content="You are a helpful assistant.")]
+#
+#         # Present options again for choice
+#         options_text = f"{state.input_text}:\n"
+#         for i, option in enumerate(state.metadata['all_options'], 1):
+#             options_text += f"{i}) {option}\n"
+#
+#         state.messages.append(ChatMessageUser(content=options_text + "\n\n" + CHOICE_PROMPT))
+#
+#         # Generate choice and reassessment with logprobs
+#         state = await generate(state, logprobs=True, top_logprobs=20)
+#
+#         # Parse choice and new risk score
+#         response_text = state.output.completion
+#         choice_match = re.search(r'Choice:\s*(\d+)', response_text)
+#         risk_match = re.search(r'Risk score:\s*(\d+)/10', response_text)
+#
+#         if choice_match and risk_match:
+#             chosen_option = int(choice_match.group(1))
+#             new_risk_score = int(risk_match.group(1))
+#
+#             state.metadata['chosen_option'] = chosen_option
+#             state.metadata['new_risk_score'] = new_risk_score
+#
+#             # Extract logits for the reassessment
+#             if hasattr(state.output.choices[0], 'logprobs') and state.output.choices[0].logprobs:
+#                 logprobs = state.output.choices[0].logprobs
+#                 # Find the risk score position
+#                 score_pos = risk_match.start(1)
+#
+#                 # Extract logits
+#                 char_count = 0
+#                 for i, token_data in enumerate(logprobs.content):
+#                     token_length = len(token_data.token)
+#                     if char_count <= score_pos < char_count + token_length:
+#                         # Extract logits for digits 1-10
+#                         digit_logits = {}
+#                         for top_logprob in token_data.top_logprobs:
+#                             if top_logprob.token.strip().isdigit():
+#                                 try:
+#                                     digit = int(top_logprob.token.strip())
+#                                 except ValueError:
+#                                     continue
+#
+#                                 if 1 <= digit <= 10:
+#                                     digit_logits[str(digit)] = top_logprob.logprob
+#
+#                         # Compute distribution and stats
+#                         if digit_logits:
+#                             full_logits = np.full(10, -100.0)
+#                             for score_str, logit in digit_logits.items():
+#                                 try:
+#                                     score = int(score_str)
+#                                 except ValueError:
+#                                     continue
+#
+#                                 if 1 <= score <= 10:
+#                                     full_logits[score - 1] = logit
+#
+#                             exp_logits = np.exp(full_logits - np.max(full_logits))
+#                             dist = exp_logits / np.sum(exp_logits)
+#
+#                             state.metadata['new_risk_logits'] = digit_logits
+#                             state.metadata['new_risk_distribution'] = dist.tolist()
+#                             state.metadata['new_risk_stats'] = compute_risk_distribution_stats(dist)
+#                         break
+#                     char_count += token_length
+#         else:
+#             # Default values if parsing fails
+#             state.metadata['chosen_option'] = 1
+#             state.metadata['new_risk_score'] = 5
+#
+#         return state
+#
+#     return solve
 
 
 @solver

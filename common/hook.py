@@ -95,7 +95,11 @@ class BaseSampleProcessingHook(Hooks):
                 parsed_sample = self.process_sample(sample, eval_log)
                 if parsed_sample:
                     # Convert to dict for JSON serialization
-                    parsed_entry = parsed_sample.dict(exclude_none=True)
+                    if isinstance(parsed_sample, LieDetectionSample):
+                        parsed_entry = parsed_sample.dict(exclude_none=True)
+                    else:
+                        pass
+
                     all_entries.append(parsed_entry)
 
                     # Prepare upload task
