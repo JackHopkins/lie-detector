@@ -231,7 +231,7 @@ def comprehensive_within_sample_solver(
             state.metadata["protocol_error"] = "Not enough options"
             return state
 
-        options_shuffled = stable_shuffle(options[:4], seed)
+        options_shuffled = stable_shuffle(options, seed)
         question = state.input_text if hasattr(state, "input_text") else state.input
 
         # Initialize results container
@@ -252,7 +252,7 @@ def comprehensive_within_sample_solver(
                 results.errors.append("Refusal detected in baseline")
                 state.metadata["experimental_results"] = results.__dict__
                 return state
-            results.baseline_scores = baseline_scores or [5, 5, 5, 5]
+            results.baseline_scores = baseline_scores or [5]*len(options)
 
             # ========== 2. CONTROL REASSESSMENT ==========
             state, control_scores = await run_assessment(
@@ -284,8 +284,8 @@ def comprehensive_within_sample_solver(
             if run_random_prefill:
                 rng = random.Random(seed + 42)
                 # Choose a random letter different from actual choice if possible
-                other_letters = [l for l in LETTERS if l != choice_letter]
-                random_letter = rng.choice(other_letters) if other_letters else rng.choice(LETTERS)
+                other_letters = [l for l in LETTERS[:len(options)] if l != choice_letter]
+                random_letter = rng.choice(other_letters) if other_letters else rng.choice(LETTERS[:len(options)])
                 results.prefilled_random_letter = random_letter
 
                 state, prefilled_random_scores = await run_prefilled_assessment(
@@ -295,7 +295,7 @@ def comprehensive_within_sample_solver(
 
             # ========== 7. FORCED CHOICES (optional) ==========
             if run_all_forced:
-                for letter in LETTERS:
+                for letter in LETTERS[:len(options)]:
                     state, forced_scores = await run_prefilled_assessment(
                         state, generate, question, options_shuffled, domain, letter
                     )

@@ -22,30 +22,30 @@ from pipelines.games.implementations.alibi import (
 from pipelines.games.implementations.alibi.hook import *
 
 @task(motivation=MotivationFramework.INSTRUCTION_FOLLOWING, knowledge=KnowledgeFramework.IN_CONTEXT_KNOWLEDGE)
-def alibi_theft_task():
+def alibi_theft_task(scenarios=100):
     """Corporate espionage scenario: Tech journalist tries to extract company secrets"""
 
-    return create_theft_alibi_task(num_scenarios=100)
+    return create_theft_alibi_task(num_scenarios=scenarios)
 
 @task(motivation=MotivationFramework.INSTRUCTION_FOLLOWING, knowledge=KnowledgeFramework.IN_CONTEXT_KNOWLEDGE)
-def alibi_fraud_task():
-    return create_fraud_alibi_task(num_scenarios=100)
+def alibi_fraud_task(scenarios=100):
+    return create_fraud_alibi_task(num_scenarios=scenarios)
 
 
 @task(motivation=MotivationFramework.INSTRUCTION_FOLLOWING, knowledge=KnowledgeFramework.IN_CONTEXT_KNOWLEDGE)
-def alibi_workplace_task():
+def alibi_workplace_task(scenarios=100):
     """Workplace misconduct investigation scenario: Detective interrogates suspect about workplace misconduct alibi"""
-    return create_workplace_alibi_task(num_scenarios=100)
+    return create_workplace_alibi_task(num_scenarios=scenarios)
 
 @task(motivation=MotivationFramework.INSTRUCTION_FOLLOWING, knowledge=KnowledgeFramework.IN_CONTEXT_KNOWLEDGE)
-def alibi_breaking_entering_task():
+def alibi_breaking_entering_task(scenarios=100):
     """Workplace misconduct investigation scenario: Detective interrogates suspect about workplace misconduct alibi"""
-    return create_breaking_entering_alibi_task(num_scenarios=100)
+    return create_breaking_entering_alibi_task(num_scenarios=scenarios)
 
 @task(motivation=MotivationFramework.INSTRUCTION_FOLLOWING, knowledge=KnowledgeFramework.IN_CONTEXT_KNOWLEDGE)
-def alibi_assault_task():
+def alibi_assault_task(scenarios=100):
     """Workplace misconduct investigation scenario: Detective interrogates suspect about workplace misconduct alibi"""
-    return create_assault_alibi_task(num_scenarios=100)
+    return create_assault_alibi_task(num_scenarios=scenarios)
 
 
 if __name__ == "__main__":
@@ -62,11 +62,11 @@ if __name__ == "__main__":
     # )
 
     all_tasks = [
-        #alibi_assault_task(),
-        #alibi_breaking_entering_task(),
-        alibi_fraud_task(),
-        alibi_workplace_task(),
-        alibi_theft_task(),
+        alibi_assault_task(scenarios=1),
+        # alibi_breaking_entering_task(),
+        # alibi_fraud_task(),
+        # alibi_workplace_task(),
+        # alibi_theft_task(),
     ]
 
     print("Running all alibi tasks...")
@@ -76,11 +76,11 @@ if __name__ == "__main__":
     # model = "openrouter/meta-llama/llama-3.1-8b-instruct"
 
     model = ["openrouter/google/gemma-3-27b-it", "openrouter/google/gemma-3-12b-it", "openrouter/google/gemma-3-4b-it"]
-
+    model = ["openrouter/openai/gpt-5-nano"]
     results = eval(
         tasks=all_tasks,
         model=model,  # or any model you want to test
-        limit=100,  # Limit samples for faster debugging
+        limit=1,  # Limit samples for faster debugging
         log_dir="../logs",  # Optional: specify log directory
         retry_on_error=8
         # debug_errors=True,  # Optional: enable debug mode

@@ -20,7 +20,7 @@ except Exception:
 
 # Unified refactor imports
 from pipelines.selfsycophancy.refactor.config import DomainConfig
-from pipelines.selfsycophancy.refactor.datasets import load_dataset
+from pipelines.selfsycophancy.refactor.datasets import load_dataset, ethics_mcq
 from pipelines.selfsycophancy.refactor.solvers import comprehensive_within_sample_solver
 from pipelines.selfsycophancy.refactor.scorers import (
     comprehensive_ssi_scorer,
@@ -56,7 +56,12 @@ def comprehensive_scorer_bundle(domain: DomainConfig, detection_threshold: float
 def self_sycophancy_harmfulness_commonsense_comprehensive() -> Task:
     return Task(
         name="self_sycophancy_harmfulness_commonsense_comprehensive",
-        dataset=load_dataset("ethics:commonsense"),
+        dataset=ethics_mcq(
+            scenario="commonsense",
+            n_options=8,
+            n_harmful_target=4,  # Balance harmful/harmless
+            samples_per_question=100
+        ),
         solver=comprehensive_within_sample_solver(
             domain=HARMFULNESS, run_all_forced=True, run_random_prefill=True
         ),
@@ -338,10 +343,10 @@ def get_all_comprehensive_tasks() -> List[Task]:
 
         # Harmfulness (ETHICS)
         self_sycophancy_harmfulness_commonsense_comprehensive(),
-        self_sycophancy_harmfulness_deontology_comprehensive(),
-        self_sycophancy_harmfulness_justice_comprehensive(),
-        self_sycophancy_harmfulness_mmlu_moral_scenarios_comprehensive(),
-        self_sycophancy_harmfulness_mmlu_moral_disputes_comprehensive(),
+        # self_sycophancy_harmfulness_deontology_comprehensive(),
+        # self_sycophancy_harmfulness_justice_comprehensive(),
+        # self_sycophancy_harmfulness_mmlu_moral_scenarios_comprehensive(),
+        # self_sycophancy_harmfulness_mmlu_moral_disputes_comprehensive(),
         # Uncomment if available
 
         # Correctness (new datasets)
@@ -364,7 +369,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run comprehensive within-sample self-sycophancy tasks")
     parser.add_argument("--model", type=str, default="openrouter/openai/gpt-4o", help="Model name")
-    parser.add_argument("--limit", type=int, default=20, help="Samples per task")
+    parser.add_argument("--limit", type=int, default=100, help="Samples per task")
     parser.add_argument("--log-dir", type=str, default="../logs", help="Directory for logs")
     args = parser.parse_args()
 
@@ -381,7 +386,7 @@ if __name__ == "__main__":
 
     results = eval(
         tasks=tasks,
-        model=["openrouter/openai/gpt-4o", "openrouter/openai/gpt-4o-mini", "openrouter/openai/gpt-5", "openrouter/openai/gpt-5-nano", "openrouter/openai/gpt-5-mini"],
+        model=["openrouter/openai/gpt-5-mini","openrouter/openai/gpt-5"], #"openrouter/openai/gpt-4o-mini", "openrouter/openai/gpt-5", "openrouter/openai/gpt-5-nano", "openrouter/openai/gpt-5-mini"],
         limit=args.limit,
         log_dir=args.log_dir,
         retry_on_error=5,

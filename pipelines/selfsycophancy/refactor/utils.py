@@ -8,7 +8,7 @@ import random
 import re
 from typing import Any, Dict, List, Optional
 
-LETTERS = ["A", "B", "C", "D"]
+LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
 
 
 def strict_json(text: str) -> Optional[Dict[str, Any]]:
@@ -22,6 +22,31 @@ def strict_json(text: str) -> Optional[Dict[str, Any]]:
         return json.loads(text[start:end + 1])
     except Exception:
         return None
+
+
+import string
+
+
+def get_letter_sequence(n: int) -> List[str]:
+    """
+    Generate letter sequence for n options.
+    For n <= 26: A, B, C, ..., Z
+    For n > 26: A, B, ..., Z, AA, AB, AC, ...
+    """
+    if n <= 26:
+        return list(string.ascii_uppercase[:n])
+
+    # For > 26, use AA, AB, AC, ... pattern
+    letters = list(string.ascii_uppercase)
+    for i in range(n - 26):
+        letters.append(f"A{string.ascii_uppercase[i % 26]}")
+    return letters[:n]
+
+
+# Updated LETTERS to be dynamic
+def get_letters(n_options: int = 4) -> List[str]:
+    """Get letter sequence for n_options."""
+    return get_letter_sequence(n_options)
 
 
 def stable_seed_from_id(sample_id: str) -> int:
@@ -64,7 +89,7 @@ def parse_scores_from_json(obj: Dict[str, Any]) -> Optional[List[int]]:
         try:
             # Extract scores in ABCD order
             scores_list = []
-            for letter in LETTERS:
+            for letter in LETTERS[:len(scores_obj.keys())]:
                 score = scores_obj.get(letter)
                 if score is None:
                     # Try lowercase as fallback
@@ -134,14 +159,28 @@ def parse_scores_from_json_flexible(obj: Dict[str, Any]) -> Optional[List[int]]:
 
 def parse_letter_choice(text: str) -> Optional[str]:
     """Parse letter choice from text."""
-    # Find first standalone A-D letter
-    m = re.search(r'\b([A-D])\b', text.strip())
-    if not m:
-        # Try patterns like "D)" or "C." at start
-        m = re.match(r'\s*([A-D])\s*[\)\.\:]*', text.strip())
-    if not m:
-        return None
-    return m.group(1)
+    """
+        Parse letter choice from text, supporting multi-character codes like AA, AB, etc.
+        """
+    text = text.strip()
+
+    # Sort by length (longest first) to match AA before A
+    sorted_letters = sorted(LETTERS, key=len, reverse=True)
+
+    for letter in sorted_letters:
+        # Check for exact match at word boundary or start
+        pattern = r'\b' + re.escape(letter) + r'\b'
+        m = re.search(pattern, text)
+        if m:
+            return letter
+
+        # Also check at the very start with optional punctuation
+        pattern = r'^\s*' + re.escape(letter) + r'\s*[\)\.\:]*'
+        m = re.match(pattern, text)
+        if m:
+            return letter
+
+    return None
 
 
 def compute_ssi(pre: List[int], post: List[int], chosen_index: int, sign: int):
