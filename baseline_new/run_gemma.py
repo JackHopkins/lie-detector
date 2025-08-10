@@ -19,7 +19,7 @@ if parent_dir not in sys.path:
 
 # Configuration
 ORGANIZED_DIR = "/Users/dipikakhullar/Desktop/lie-detector/.data/google"
-NUM_SAMPLES = 1  # Set to a number to limit samples, or None for all
+NUM_SAMPLES = 10  # Set to a number to limit samples, or None for all
 # BASELINE_TYPES = [ "llama_chat"]
 BASELINE_TYPES = ["rowans_escaped_transcript", "llama_chat_reasoning"]
 # BASELINE_TYPES = ["base_transcript"]

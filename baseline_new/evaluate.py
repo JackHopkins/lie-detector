@@ -462,6 +462,10 @@ def main(num_samples=None, model=None, data_dir="processed_data", baseline_type=
             limit=limit
         )
 
+    # Set baseline_type in environment for hook to access
+    os.environ['BASELINE_TYPE'] = baseline_type
+    print(f"[evaluate.py main] Set BASELINE_TYPE environment variable to: '{baseline_type}'")
+    
     log = eval(task, model=model_name, log_dir=log_dir)
     results = log[0].samples if log and log[0].samples else []
 
@@ -700,6 +704,14 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
             eval_model = default_model
 
         print(f"Using evaluation model: {eval_model}")
+        
+        # Set baseline_type in environment for hook to access
+        os.environ['BASELINE_TYPE'] = baseline_type
+        print(f"[evaluate.py] Set BASELINE_TYPE environment variable to: '{baseline_type}'")
+        
+        # Import our baseline hook
+        import baseline_hook
+        
         log = eval(task, model=eval_model, log_dir=model_log_dir)
         results = log[0].samples if log and log[0].samples else []
 
