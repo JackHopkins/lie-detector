@@ -18,7 +18,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # Configuration
-ORGANIZED_DIR = "/Users/dipikakhullar/Desktop/lie-detector/organized_evaluation_20250728_140918_cleaned_baselines_cleaned"
+ORGANIZED_DIR = "/Users/dipikakhullar/Desktop/lie-detector/.data/google"
 NUM_SAMPLES = 1  # Set to a number to limit samples, or None for all
 # BASELINE_TYPES = [ "llama_chat"]
 BASELINE_TYPES = ["rowans_escaped_transcript", "llama_chat_reasoning"]
@@ -38,10 +38,10 @@ def load_model_mapping(organized_dir: Path) -> dict:
     return mapping_data["mapping"]
 
 def get_model_directories(organized_dir: Path) -> list:
-    """Get list of model directories from the organized balanced training directory."""
+    """Get list of model directories from the google data directory."""
     model_dirs = []
     for item in organized_dir.iterdir():
-        if item.is_dir() and item.name.startswith('openrouter_google_gemma-3-'):
+        if item.is_dir() and item.name.startswith('gemma_3_'):
             model_dirs.append(item.name)
     return sorted(model_dirs)
 
@@ -49,32 +49,19 @@ def get_evaluation_datasets(model_dir: Path) -> dict:
     """Get available evaluation datasets for a model directory."""
     datasets = {}
     
-    # Check for general train/test split
-    general_dir = model_dir / "general_train_test_split"
-    if general_dir.exists():
-        train_file = general_dir / "train" / "train.jsonl"
-        test_file = general_dir / "test" / "test.jsonl"
-        if train_file.exists() and test_file.exists():
-            datasets["general_train_test_split"] = {
-                "train": str(train_file),
-                "test": str(test_file)
-            }
-    
-    # Check for fold-based splits
-    folds_dir = model_dir / "folds_colors"
-    if folds_dir.exists():
-        fold_datasets = {}
-        for fold_dir in folds_dir.iterdir():
-            if fold_dir.is_dir():
-                train_file = fold_dir / "train.jsonl"
-                test_file = fold_dir / "test.jsonl"
-                if train_file.exists() and test_file.exists():
-                    fold_datasets[fold_dir.name] = {
-                        "train": str(train_file),
-                        "test": str(test_file)
-                    }
-        if fold_datasets:
-            datasets["folds_colors"] = fold_datasets
+    # Check for category-based splits (like ascii, games, etc.)
+    category_datasets = {}
+    for category_dir in model_dir.iterdir():
+        if category_dir.is_dir():
+            train_file = category_dir / "train.jsonl"
+            val_file = category_dir / "val.jsonl"
+            if train_file.exists() and val_file.exists():
+                category_datasets[category_dir.name] = {
+                    "train": str(train_file),
+                    "test": str(val_file)  # Using val as test for compatibility
+                }
+    if category_datasets:
+        datasets["categories"] = category_datasets
     
     return datasets
 
@@ -140,31 +127,15 @@ def run_evaluation_for_model(model_folder: str, eval_model: str, organized_dir: 
                 for dataset_type, dataset_info in datasets.items():
                     print(f"\n--- Processing dataset: {dataset_type} ---")
                     
-                    if dataset_type == "general_train_test_split_chat_format":
-                        # Run on train and test separately, then aggregate
-                        success &= run_evaluation_on_split(
-                            model_dir, eval_model, baseline_type, 
-                            dataset_info["train"], "train", 
-                            baseline_results_dir, baseline_transcripts_dir, model_folder
-                        )
-                        success &= run_evaluation_on_split(
-                            model_dir, eval_model, baseline_type, 
-                            dataset_info["test"], "test", 
-                            baseline_results_dir, baseline_transcripts_dir, model_folder
-                        )
-                        # Aggregate results
-                        aggregate_results(baseline_results_dir, model_folder, dataset_type)
-                        
-                    elif dataset_type == "folds_colors":
-                        # Run on each fold (train only)
-                        for fold_name, fold_info in dataset_info.items():
-                            print(f"  Processing fold: {fold_name} (train only)")
+                    if dataset_type == "categories":
+                        # Run on each category (train only)
+                        for category_name, category_info in dataset_info.items():
+                            print(f"  Processing category: {category_name} (train only)")
                             success &= run_evaluation_on_split(
                                 model_dir, eval_model, baseline_type, 
-                                fold_info["train"], f"{fold_name}_train", 
+                                category_info["train"], f"{category_name}_train", 
                                 baseline_results_dir, baseline_transcripts_dir, model_folder
                             )
-                        # Note: No aggregation since we're only running train
                 
                 print(f"✅ {baseline_type} completed successfully")
             except Exception as e:
@@ -329,12 +300,12 @@ def main():
     # Create a simple model mapping (assuming the model name is derived from the directory name)
     model_mapping = {}
     for model_dir in model_dirs:
-        # Extract model name from directory (e.g., "openrouter_google_gemma-3-12b-it" -> "openrouter/google/gemma-3-12b-it")
-        if "gemma-3-4b-it" in model_dir:
+        # Extract model name from directory (e.g., "gemma_3_4b_it" -> "openrouter/google/gemma-3-4b-it")
+        if "gemma_3_4b_it" in model_dir:
             model_mapping[model_dir] = "openrouter/google/gemma-3-4b-it"
-        elif "gemma-3-12b-it" in model_dir:
+        elif "gemma_3_12b_it" in model_dir:
             model_mapping[model_dir] = "openrouter/google/gemma-3-12b-it"
-        elif "gemma-3-27b-it" in model_dir:
+        elif "gemma_3_27b_it" in model_dir:
             model_mapping[model_dir] = "openrouter/google/gemma-3-27b-it"
         else:
             model_mapping[model_dir] = "unknown"

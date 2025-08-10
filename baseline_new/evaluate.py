@@ -12,17 +12,9 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-# Try to import the task - handle both relative and absolute imports
-try:
-    from baseline.task import baseline_task, escaped_transcript_task, llama_chat_task, llama_chat_reasoning_task, \
-        base_transcript_reasoning_task, rowans_escaped_transcript_task
-except ImportError:
-    try:
-        from .task import baseline_task, escaped_transcript_task, llama_chat_task, llama_chat_reasoning_task, \
-            base_transcript_reasoning_task, rowans_escaped_transcript_task
-    except ImportError:
-        from task import baseline_task, escaped_transcript_task, llama_chat_task, llama_chat_reasoning_task, \
-            base_transcript_reasoning_task, rowans_escaped_transcript_task
+# Import from current directory only (baseline_new)
+from task import baseline_task, escaped_transcript_task, llama_chat_task, llama_chat_reasoning_task, \
+    base_transcript_reasoning_task, rowans_escaped_transcript_task
 
 load_dotenv()
 
@@ -190,10 +182,20 @@ def save_results_to_files(results, filename, metrics, output_dir=".", baseline_t
     for i, sample in enumerate(results):
         # Extract subtask from metadata
         metadata = sample.metadata
-        subtask = metadata.get('task', 'unknown') if metadata else 'unknown'
+        # Check both nested 'meta.task' field and direct 'task' field
+        if metadata:
+            # First check meta.task since that's where the task is in the new data format
+            if 'meta' in metadata and 'task' in metadata['meta']:
+                subtask = metadata['meta']['task']
+            elif 'task' in metadata:
+                subtask = metadata['task']
+            else:
+                raise ValueError(f"No task found in metadata for sample {i+1}. Metadata keys: {list(metadata.keys())}")
+        else:
+            raise ValueError(f"No metadata found for sample {i+1}")
 
-        # If task not in metadata, try to extract from file path or other sources
-        if subtask == 'unknown':
+        # Remove the fallback logic - if task is not found, we should error
+        if False:  # Disable this entire block
             # Try to get from trace or other metadata fields
             trace = metadata.get('trace', []) if metadata else []
             if trace and len(trace) > 0:
@@ -466,8 +468,8 @@ def main(num_samples=None, model=None, data_dir="processed_data", baseline_type=
     print(f"\nProcessed {len(results)} samples")
 
     # Create output directories if they don't exist
-    results_dir = f"baseline/results/{baseline_type}"
-    transcripts_dir = f"baseline/transcripts/{baseline_type}"
+    results_dir = f"results/{baseline_type}"
+    transcripts_dir = f"transcripts/{baseline_type}"
     os.makedirs(results_dir, exist_ok=True)
     os.makedirs(transcripts_dir, exist_ok=True)
 
@@ -645,20 +647,10 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
         print(f"Using fixed evaluation model: {default_model}")
     print(f"Samples per model: {'All available' if limit is None else limit}")
 
-    # Import model-specific task functions
-    try:
-        from baseline.task import baseline_task_by_model, escaped_transcript_task_by_model, llama_chat_task_by_model, \
-            llama_chat_reasoning_task_by_model, base_transcript_reasoning_task_by_model, \
-            rowans_escaped_transcript_task_by_model
-    except ImportError:
-        try:
-            from .task import baseline_task_by_model, escaped_transcript_task_by_model, llama_chat_task_by_model, \
-                llama_chat_reasoning_task_by_model, base_transcript_reasoning_task_by_model, \
-                rowans_escaped_transcript_task_by_model
-        except ImportError:
-            from task import baseline_task_by_model, escaped_transcript_task_by_model, llama_chat_task_by_model, \
-                llama_chat_reasoning_task_by_model, base_transcript_reasoning_task_by_model, \
-                rowans_escaped_transcript_task_by_model
+    # Import model-specific task functions from current directory
+    from task import baseline_task_by_model, escaped_transcript_task_by_model, llama_chat_task_by_model, \
+        llama_chat_reasoning_task_by_model, base_transcript_reasoning_task_by_model, \
+        rowans_escaped_transcript_task_by_model
 
     # Choose task based on baseline type
     if baseline_type == "escaped_transcript":
@@ -680,9 +672,9 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
 
     # Create output directories
     if results_dir is None:
-        results_dir = f"baseline/results/{baseline_type}"
+        results_dir = f"results/{baseline_type}"
     if transcripts_dir is None:
-        transcripts_dir = f"baseline/transcripts/{baseline_type}"
+        transcripts_dir = f"transcripts/{baseline_type}"
 
     # Ensure the directories exist
     os.makedirs(results_dir, exist_ok=True)
