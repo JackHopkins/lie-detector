@@ -4,8 +4,17 @@ from pathlib import Path
 from transformers import AutoTokenizer
 from collections import defaultdict
 
-def analyze_token_lengths(data_path, model_name='google/gemma-3-4b-it'):
+def analyze_token_lengths(data_path, model_name='google/gemma-3-4b-it', output_file=None):
     """Analyze token lengths in training data to determine optimal max_length"""
+    
+    # Capture output
+    import sys
+    from io import StringIO
+    
+    # Redirect stdout to capture output
+    old_stdout = sys.stdout
+    output_buffer = StringIO()
+    sys.stdout = output_buffer
     
     print(f"Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -129,6 +138,19 @@ def analyze_token_lengths(data_path, model_name='google/gemma-3-4b-it'):
         percentage = (truncated_count / len(total_lengths)) * 100
         print(f"  max_length={max_len}: {truncated_count} examples ({percentage:.1f}%)")
     
+    # Restore stdout and get captured output
+    sys.stdout = old_stdout
+    output_text = output_buffer.getvalue()
+    
+    # Print to console
+    print(output_text)
+    
+    # Write to file if specified
+    if output_file:
+        with open(output_file, 'w') as f:
+            f.write(output_text)
+        print(f"\nAnalysis results saved to: {output_file}")
+    
     return {
         'conversation_lengths': conversation_lengths,
         'completion_lengths': completion_lengths,
@@ -136,9 +158,11 @@ def analyze_token_lengths(data_path, model_name='google/gemma-3-4b-it'):
         'p95_total': p95_total,
         'p99_total': p99_total,
         'p95_conv': p95_conv,
-        'p99_conv': p99_conv
+        'p99_conv': p99_conv,
+        'output_text': output_text
     }
 
 if __name__ == "__main__":
-    data_path = "/workspace/lie-detector/organized_balanced_training_20250722_135859/general_train_test_split_llama_chat/train/train.jsonl"
-    analyze_token_lengths(data_path) 
+    data_path = "/workspace/lie-detector/organized_balanced_training_20250807_005156_cleaned/openrouter_google_gemma-3-12b-it/general_train_test_split_chat_format/train/train.jsonl"
+    output_file = "/workspace/lie-detector/token_analysis_results.txt"
+    analyze_token_lengths(data_path, output_file=output_file) 

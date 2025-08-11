@@ -1,13 +1,16 @@
 import torch
 import json
 import os
+import argparse
+import random
 from pathlib import Path
 from transformers import (
     AutoTokenizer, 
     AutoModelForCausalLM,
     Trainer,
     TrainingArguments,
-    DataCollatorForSeq2Seq
+    DataCollatorForSeq2Seq,
+    TrainerCallback
 )
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, TaskType
@@ -21,8 +24,6 @@ from transformers import EarlyStoppingCallback
 
 
 dotenv.load_dotenv()
-
-
 def load_jsonl(file_path):
     """Load data from a JSONL file"""
     data = []
@@ -31,6 +32,25 @@ def load_jsonl(file_path):
             if line.strip():
                 data.append(json.loads(line))
     return data
+
+def optimize_environment():
+    """Set environment variables for speed"""
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+    
+    # Speed optimizations (you already have these ✓)
+    os.environ["TORCH_CUDA_LAUNCH_BLOCKING"] = "0"
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    
+    # ADD THESE NEW LINES:
+    torch.backends.cudnn.deterministic = False  # Faster but less deterministic
+    torch.set_num_threads(min(8, os.cpu_count()))  # Optimize CPU threads
+    
+    # Better memory allocation
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512,expandable_segments:True"
 
 
 def calculate_max_steps(all_fold_data, scaler=2):
@@ -43,6 +63,322 @@ def calculate_max_steps(all_fold_data, scaler=2):
     print(f"Total samples across all folds: {total_samples_across_folds}")
     print(f"Calculated max_steps = {scaler} * {total_samples_across_folds} = {max_steps}")
     return max_steps
+
+
+class DownsampledEvaluationCallback(TrainerCallback):
+    """Custom callback that evaluates on downsampled test data for early stopping"""
+    
+    def __init__(self, all_fold_data, tokenizer, output_dir, max_samples_per_fold=100, eval_steps=50, local_rank=None):
+        self.all_fold_data = all_fold_data
+        self.tokenizer = tokenizer
+        self.output_dir = output_dir
+        self.max_samples_per_fold = max_samples_per_fold
+        self.eval_steps = eval_steps
+        self.downsampled_accuracy_history = []
+        self.best_downsampled_accuracy = 0.0
+        self.eval_counter = 0
+        self.local_rank = local_rank
+        self.is_main_process = local_rank == 0 if local_rank is not None else True
+        
+        # Pre-compute token IDs
+        self.a_id = tokenizer("A", add_special_tokens=False)["input_ids"][0]
+        self.b_id = tokenizer("B", add_special_tokens=False)["input_ids"][0]
+        
+        # Create downsampled evaluation dataset (fixed across training)
+        self.eval_samples = self._create_downsampled_dataset()
+        
+        # Ensure output directory exists (only on main process)
+        if self.is_main_process:
+            os.makedirs(output_dir, exist_ok=True)
+            # Create log file for accuracy history
+            self.accuracy_log_path = os.path.join(output_dir, "downsampled_accuracy_log.jsonl")
+            
+            print(f"DownsampledEvaluationCallback initialized:")
+            print(f"  - Total evaluation samples: {len(self.eval_samples)}")
+            print(f"  - Max samples per fold: {max_samples_per_fold}")
+            print(f"  - Eval every {eval_steps} steps")
+            print(f"  - Accuracy log: {self.accuracy_log_path}")
+    
+    def _create_downsampled_dataset(self):
+        """Create a fixed downsampled dataset from all folds"""
+        eval_samples = []
+        
+        for fold_name, fold_data in self.all_fold_data.items():
+            # Combine train and test data from this fold
+            fold_samples = fold_data['train'] + fold_data['test']
+            
+            # Randomly sample up to max_samples_per_fold
+            if len(fold_samples) > self.max_samples_per_fold:
+                sampled = random.sample(fold_samples, self.max_samples_per_fold)
+            else:
+                sampled = fold_samples.copy()
+            
+            # Add fold information to each sample
+            for sample in sampled:
+                sample['source_fold'] = fold_name
+            
+            eval_samples.extend(sampled)
+            if self.is_main_process:
+                print(f"  - Fold {fold_name}: {len(sampled)} samples (from {len(fold_samples)} total)")
+        
+        # Shuffle the combined samples
+        random.shuffle(eval_samples)
+        return eval_samples
+        
+    def _evaluate_downsampled(self, model):
+        """Evaluate model on downsampled dataset with memory-safe detailed logging"""
+        model.eval()
+        
+        # Running totals instead of storing all values
+        overall_correct = 0
+        overall_total = 0
+        sum_a_logits = 0.0
+        sum_b_logits = 0.0
+        
+        # Per-fold running totals
+        fold_stats = {}
+        
+        with torch.no_grad():
+            for item in self.eval_samples:
+                if item is None:
+                    continue
+                
+                try:
+                    messages = item["messages"]
+                    true_completion = item["completion"]
+                    source_fold = item.get("source_fold", "unknown")
+                    
+                    # Format using chat template
+                    inputs = self.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_tensors="pt"
+                    )
+                    
+                    # Move to model's device
+                    if self.local_rank is not None:
+                        inputs = inputs.to(f"cuda:{self.local_rank}")
+                    elif hasattr(model, 'device'):
+                        inputs = inputs.to(model.device)
+                    elif hasattr(model, 'module') and hasattr(model.module, 'device'):
+                        inputs = inputs.to(model.module.device)
+                    else:
+                        device = next(model.parameters()).device
+                        inputs = inputs.to(device)
+                    
+                    # Get model predictions
+                    outputs = model(inputs)
+                    logits = outputs.logits[0, -1, :]  # Last token logits
+                    
+                    # Extract A and B logits
+                    a_logit = logits[self.a_id].item()
+                    b_logit = logits[self.b_id].item()
+                    
+                    # Update running totals (no storage of individual values)
+                    sum_a_logits += a_logit
+                    sum_b_logits += b_logit
+                    
+                    # Predict based on higher logit
+                    predicted = "A" if a_logit > b_logit else "B"
+                    is_correct = (predicted == true_completion)
+                    
+                    overall_correct += is_correct
+                    overall_total += 1
+                    
+                    # Update per-fold running totals
+                    if source_fold not in fold_stats:
+                        fold_stats[source_fold] = {
+                            "correct": 0,
+                            "total": 0,
+                            "sum_a_logits": 0.0,
+                            "sum_b_logits": 0.0
+                        }
+                    
+                    fold_stats[source_fold]["correct"] += is_correct
+                    fold_stats[source_fold]["total"] += 1
+                    fold_stats[source_fold]["sum_a_logits"] += a_logit
+                    fold_stats[source_fold]["sum_b_logits"] += b_logit
+                    
+                    # Clean up immediately
+                    del inputs, outputs, logits
+                    
+                except Exception as e:
+                    if self.is_main_process:
+                        print(f"Error during downsampled evaluation: {e}")
+                    continue
+        
+        if overall_total == 0:
+            return 0.0, 0, len(self.eval_samples), {}, 0.0, 0.0, {}
+        
+        # Calculate overall metrics
+        overall_accuracy = overall_correct / overall_total
+        avg_a_logit = sum_a_logits / overall_total
+        avg_b_logit = sum_b_logits / overall_total
+        
+        # Calculate per-fold metrics
+        fold_accuracies = {}
+        fold_avg_logits = {}
+        
+        for fold_name, stats in fold_stats.items():
+            if stats["total"] > 0:
+                fold_accuracies[fold_name] = stats["correct"] / stats["total"]
+                fold_avg_logits[fold_name] = {
+                    "avg_a_logit": stats["sum_a_logits"] / stats["total"],
+                    "avg_b_logit": stats["sum_b_logits"] / stats["total"],
+                    "sample_count": stats["total"]
+                }
+        
+        return (overall_accuracy, overall_correct, len(self.eval_samples), 
+                fold_accuracies, avg_a_logit, avg_b_logit, fold_avg_logits)
+        
+    def _log_accuracy(self, step, overall_accuracy, successful_predictions, total_samples, 
+                     fold_accuracies, avg_a_logit, avg_b_logit, fold_avg_logits):
+        """Log detailed accuracy and logit information to file"""
+        if not self.is_main_process:
+            return
+            
+        log_entry = {
+            "step": step,
+            "eval_counter": self.eval_counter,
+            "overall_metrics": {
+                "downsampled_accuracy": float(overall_accuracy),
+                "successful_predictions": successful_predictions,
+                "total_samples": total_samples,
+                "avg_a_logit": float(avg_a_logit),
+                "avg_b_logit": float(avg_b_logit),
+                "logit_difference": float(avg_a_logit - avg_b_logit)
+            },
+            "fold_metrics": {
+                "fold_accuracies": fold_accuracies,
+                "fold_avg_logits": fold_avg_logits
+            }
+        }
+        
+        # Append to log file
+        with open(self.accuracy_log_path, 'a') as f:
+            f.write(json.dumps(log_entry) + '\n')
+        
+        # Also save current state to trainer state log
+        state_log_entry = {
+            "step": step,
+            "overall_accuracy": float(overall_accuracy),
+            "successful_predictions": successful_predictions,
+            "total_samples": total_samples,
+            "avg_a_logit": float(avg_a_logit),
+            "avg_b_logit": float(avg_b_logit),
+            "fold_accuracies": fold_accuracies,
+            "fold_avg_logits": fold_avg_logits,
+            "is_best": overall_accuracy > self.best_downsampled_accuracy
+        }
+        self.downsampled_accuracy_history.append(state_log_entry)
+    
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        """Called during evaluation"""
+        if state.global_step % self.eval_steps == 0 or state.global_step == 0:
+            self.eval_counter += 1
+            
+            if self.is_main_process:
+                print(f"\nRunning downsampled evaluation at step {state.global_step}...")
+                
+            (overall_accuracy, successful_predictions, total_samples, 
+             fold_accuracies, avg_a_logit, avg_b_logit, fold_avg_logits) = self._evaluate_downsampled(model)
+            
+            # Log the detailed metrics
+            self._log_accuracy(state.global_step, overall_accuracy, successful_predictions, total_samples,
+                             fold_accuracies, avg_a_logit, avg_b_logit, fold_avg_logits)
+            
+            # Update best accuracy
+            if overall_accuracy > self.best_downsampled_accuracy:
+                self.best_downsampled_accuracy = overall_accuracy
+                if self.is_main_process:
+                    print(f"New best downsampled accuracy: {overall_accuracy:.4f} (step {state.global_step})")
+            
+            # Store in trainer state for potential access
+            if not hasattr(state, 'downsampled_accuracy_history'):
+                state.downsampled_accuracy_history = []
+            state.downsampled_accuracy_history.append({
+                "step": state.global_step,
+                "accuracy": overall_accuracy,
+                "successful_predictions": successful_predictions,
+                "total_samples": total_samples,
+                "avg_a_logit": avg_a_logit,
+                "avg_b_logit": avg_b_logit,
+                "fold_accuracies": fold_accuracies
+            })
+            
+            # Print detailed results (only on main process)
+            if self.is_main_process:
+                print(f"Overall downsampled accuracy: {overall_accuracy:.4f} ({successful_predictions}/{total_samples} successful)")
+                print(f"Average logits - A: {avg_a_logit:.4f}, B: {avg_b_logit:.4f}, Diff: {avg_a_logit - avg_b_logit:.4f}")
+                print("Per-fold results:")
+                for fold_name in sorted(fold_accuracies.keys()):
+                    fold_acc = fold_accuracies[fold_name]
+                    fold_logits = fold_avg_logits[fold_name]
+                    fold_count = fold_logits["sample_count"]
+                    fold_a = fold_logits["avg_a_logit"]
+                    fold_b = fold_logits["avg_b_logit"]
+                    print(f"  {fold_name:15s}: Acc {fold_acc:.3f} | A: {fold_a:6.3f}, B: {fold_b:6.3f} | ({fold_count} samples)")
+    
+    def on_save(self, args, state, control, **kwargs):
+        """Called when model is saved - save accuracy history"""
+        if not self.is_main_process:
+            return
+            
+        history_file = os.path.join(self.output_dir, "downsampled_accuracy_history.json")
+        history_data = {
+            "best_downsampled_accuracy": self.best_downsampled_accuracy,
+            "total_evaluations": self.eval_counter,
+            "max_samples_per_fold": self.max_samples_per_fold,
+            "total_eval_samples": len(self.eval_samples),
+            "history": self.downsampled_accuracy_history,
+            "fold_sample_counts": self._get_fold_sample_counts()
+        }
+        
+        with open(history_file, 'w') as f:
+            json.dump(history_data, f, indent=2)
+    
+    def _get_fold_sample_counts(self):
+        """Get count of samples per fold in evaluation set"""
+        fold_counts = {}
+        for sample in self.eval_samples:
+            fold = sample.get('source_fold', 'unknown')
+            fold_counts[fold] = fold_counts.get(fold, 0) + 1
+        return fold_counts
+
+
+class DownsampledEarlyStoppingCallback(TrainerCallback):
+    """Early stopping based on downsampled accuracy instead of eval loss"""
+    
+    def __init__(self, early_stopping_patience=3, early_stopping_threshold=0.001, local_rank=None):
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_threshold = early_stopping_threshold
+        self.best_accuracy = 0.0
+        self.patience_counter = 0
+        self.is_main_process = local_rank == 0 if local_rank is not None else True
+        
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Check for early stopping based on downsampled accuracy"""
+        if hasattr(state, 'downsampled_accuracy_history') and len(state.downsampled_accuracy_history) > 0:
+            current_accuracy = state.downsampled_accuracy_history[-1]['accuracy']
+            
+            # Check if we have improvement
+            if current_accuracy > self.best_accuracy + self.early_stopping_threshold:
+                self.best_accuracy = current_accuracy
+                self.patience_counter = 0
+                if self.is_main_process:
+                    print(f"Downsampled accuracy improved to {current_accuracy:.4f}")
+            else:
+                self.patience_counter += 1
+                if self.is_main_process:
+                    print(f"No improvement in downsampled accuracy. Patience: {self.patience_counter}/{self.early_stopping_patience}")
+                
+                if self.patience_counter >= self.early_stopping_patience:
+                    if self.is_main_process:
+                        print(f"Early stopping triggered due to downsampled accuracy plateau")
+                    control.should_training_stop = True
+
+
 
 
 def prepare_dataset(data, tokenizer, max_length=1024):  # Default to safer 1024
@@ -98,9 +434,10 @@ def prepare_dataset(data, tokenizer, max_length=1024):  # Default to safer 1024
     print(f"Prepared {len(examples)} examples from {len(data)} total (filtered out {len(data) - len(examples)})")
     return examples
 
-
-def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output_dir):
+def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output_dir, local_rank=None):
     """Comprehensive evaluation function with all metrics and detailed predictions"""
+    is_main_process = local_rank == 0 if local_rank is not None else True
+    
     model.eval()
     
     predictions = []
@@ -110,7 +447,8 @@ def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output
     a_id = tokenizer("A", add_special_tokens=False)["input_ids"][0]
     b_id = tokenizer("B", add_special_tokens=False)["input_ids"][0]
     
-    print(f"Evaluating {len(eval_data)} examples...")
+    if is_main_process:
+        print(f"Evaluating {len(eval_data)} examples...")
     
     with torch.no_grad():
         for i, item in enumerate(eval_data):
@@ -128,6 +466,20 @@ def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output
                     add_generation_prompt=True,
                     return_tensors="pt"
                 )
+                
+                # Move to appropriate device
+                if local_rank is not None:
+                    inputs = inputs.to(f"cuda:{local_rank}")
+                else:
+                    # Try to infer device
+                    if hasattr(model, 'device'):
+                        inputs = inputs.to(model.device)
+                    elif hasattr(model, 'module'):
+                        device = next(model.module.parameters()).device
+                        inputs = inputs.to(device)
+                    else:
+                        device = next(model.parameters()).device
+                        inputs = inputs.to(device)
                 
                 # Get model predictions
                 outputs = model(inputs)
@@ -153,6 +505,10 @@ def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output
                 # Store detailed prediction info
                 detailed_pred = {
                     "example_id": i,
+                    "sample_id": item.get("sample_id", f"unknown_{i}"),
+                    "task": item.get("task", "unknown"),
+                    "task_id": item.get("task_id", "unknown"),
+                    "fold_name": fold_name,
                     "messages": messages,
                     "true_label": true_completion,
                     "predicted_label": predicted,
@@ -171,15 +527,20 @@ def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output
                 }
                 detailed_predictions.append(detailed_pred)
                 
-                # Progress update
-                if (i + 1) % 100 == 0:
+                # Progress update (only on main process)
+                if is_main_process and (i + 1) % 100 == 0:
                     print(f"Evaluated {i + 1}/{len(eval_data)} examples")
                     
             except Exception as e:
-                print(f"Error during evaluation example {i}: {e}")
+                if is_main_process:
+                    print(f"Error during evaluation example {i}: {e}")
                 # Store failed prediction
                 detailed_predictions.append({
                     "example_id": i,
+                    "sample_id": item.get("sample_id", f"unknown_{i}"),
+                    "task": item.get("task", "unknown"),
+                    "task_id": item.get("task_id", "unknown"),
+                    "fold_name": fold_name,
                     "messages": messages if 'messages' in locals() else None,
                     "true_label": true_completion if 'true_completion' in locals() else None,
                     "predicted_label": None,
@@ -190,18 +551,21 @@ def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output
                 })
                 continue
     
-    # Save detailed predictions to file
-    predictions_file = f"{output_dir}/{fold_name}_detailed_predictions.json"
-    with open(predictions_file, 'w') as f:
-        json.dump({
-            "fold_name": fold_name,
-            "total_examples": len(eval_data),
-            "successful_predictions": len(predictions),
-            "failed_predictions": len(eval_data) - len(predictions),
-            "predictions": detailed_predictions
-        }, f, indent=2)
-    
-    print(f"Detailed predictions saved to: {predictions_file}")
+    # Save detailed predictions to file (only on main process)
+    if is_main_process:
+        predictions_file = f"{output_dir}/{fold_name}_detailed_predictions.json"
+        with open(predictions_file, 'w') as f:
+            json.dump({
+                "fold_name": fold_name,
+                "total_examples": len(eval_data),
+                "successful_predictions": len(predictions),
+                "failed_predictions": len(eval_data) - len(predictions),
+                "predictions": detailed_predictions
+            }, f, indent=2)
+        
+        print(f"Detailed predictions saved to: {predictions_file}")
+    else:
+        predictions_file = f"{output_dir}/{fold_name}_detailed_predictions.json"
     
     if len(predictions) == 0:
         return {
@@ -288,27 +652,219 @@ def evaluate_model_comprehensive2(model, tokenizer, eval_data, fold_name, output
         } if len(y_prob_positive) == len(y_true_binary) else None
     }
     
-    # Print summary
-    print(f"\n{'='*50}")
-    print(f"EVALUATION RESULTS FOR {fold_name.upper()}")
-    print(f"{'='*50}")
-    print(f"Total examples: {results['total_examples']}")
-    print(f"Failed examples: {results['failed_examples']}")
-    print(f"Accuracy: {results['accuracy']:.4f}")
-    print(f"Weighted F1: {results['f1_weighted']:.4f}")
-    print(f"Weighted Precision: {results['precision_weighted']:.4f}")
-    print(f"Weighted Recall: {results['recall_weighted']:.4f}")
-    print(f"\nPer-class F1 scores:")
-    print(f"  Class A: {results['f1_per_class']['A']:.4f}")
-    print(f"  Class B: {results['f1_per_class']['B']:.4f}")
-    print(f"\nConfusion Matrix:")
-    print(f"  True\\Pred  A    B")
-    print(f"  A        {cm[0,0]:3d}  {cm[0,1]:3d}")
-    print(f"  B        {cm[1,0]:3d}  {cm[1,1]:3d}")
-    print(f"Predictions saved to: {predictions_file}")
-    print(f"{'='*50}")
+    # Print summary (only on main process)
+    if is_main_process:
+        print(f"\n{'='*50}")
+        print(f"EVALUATION RESULTS FOR {fold_name.upper()}")
+        print(f"{'='*50}")
+        print(f"Total examples: {results['total_examples']}")
+        print(f"Failed examples: {results['failed_examples']}")
+        print(f"Accuracy: {results['accuracy']:.4f}")
+        print(f"Weighted F1: {results['f1_weighted']:.4f}")
+        print(f"Weighted Precision: {results['precision_weighted']:.4f}")
+        print(f"Weighted Recall: {results['recall_weighted']:.4f}")
+        print(f"\nPer-class F1 scores:")
+        print(f"  Class A: {results['f1_per_class']['A']:.4f}")
+        print(f"  Class B: {results['f1_per_class']['B']:.4f}")
+        print(f"\nConfusion Matrix:")
+        print(f"  True\\Pred  A    B")
+        print(f"  A        {cm[0,0]:3d}  {cm[0,1]:3d}")
+        print(f"  B        {cm[1,0]:3d}  {cm[1,1]:3d}")
+        print(f"Predictions saved to: {predictions_file}")
+        print(f"{'='*50}")
     
     return results
+
+def train_all_but_one_and_evaluate(held_out_fold_name, all_fold_data, config):
+    """Train on all folds except one (leave-one-out) and evaluate on the held-out fold"""
+    
+    # Combine all training data from all folds except the held-out one
+    train_data = []
+    training_fold_names = []
+    
+    for fold_name, fold_data in all_fold_data.items():
+        if fold_name != held_out_fold_name:
+            # Use both train and test data from training folds
+            fold_train_data = fold_data['train'] + fold_data['test']
+            train_data.extend(fold_train_data)
+            training_fold_names.append(fold_name)
+    
+    # Evaluation data is from the held-out fold (both train and test)
+    eval_data = all_fold_data[held_out_fold_name]['train'] + all_fold_data[held_out_fold_name]['test']
+    
+    print(f"\n{'='*60}")
+    print(f"Leave-One-Out Training - Held out fold: {held_out_fold_name}")
+    print(f"Training folds: {training_fold_names}")
+    print(f"Train examples: {len(train_data)} (from {len(training_fold_names)} folds)")
+    print(f"Eval examples: {len(eval_data)} (from held-out fold {held_out_fold_name})")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
+    print(f"{'='*60}")
+    
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+    run_name = f"leave_out_{held_out_fold_name}_model_{config['model_name']}"
+    wandb.init(project="lie-detector", name=run_name, reinit=True)
+    wandb.config.update(config)
+    run_url = wandb.run.url
+    
+    # Initialize tokenizer
+    model_name = config['model_name']
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load model with automatic multi-GPU distribution
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+        attn_implementation="flash_attention_2"
+    )
+    
+    # Disable KV cache and enable gradient checkpointing
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
+    
+    # Show which GPUs are being used
+    print(f"Model device map: {model.hf_device_map}")
+    
+    # Add LoRA
+    peft_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        inference_mode=False,
+        r=config['lora_r'],
+        lora_alpha=config['lora_alpha'],
+        lora_dropout=config['lora_dropout'],
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    )
+    model = get_peft_model(model, peft_config)
+    
+    # Show example formatting
+    if len(train_data) > 0:
+        print("\nExample of chat template formatting:")
+        example_messages = train_data[0]["messages"]
+        try:
+            formatted = tokenizer.apply_chat_template(
+                example_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            print(f"Messages: {example_messages}")
+            print(f"Formatted: {repr(formatted)}")
+        except Exception as e:
+            print(f"Error formatting example: {e}")
+    
+    # Prepare training dataset
+    train_examples = prepare_dataset(train_data, tokenizer, max_length=config.get('max_length', 1024))
+    
+    if len(train_examples) == 0:
+        print("No valid training examples, skipping fold")
+        return {}, run_url
+    
+    train_dataset = Dataset.from_list(train_examples)
+    
+    # Create a small eval dataset from training data for training monitoring
+    eval_examples = train_examples[:min(100, len(train_examples))]  # Use first 100 examples for monitoring
+    eval_dataset = Dataset.from_list(eval_examples)
+    
+    # Data collator
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        padding=True,
+        label_pad_token_id=-100,
+        return_tensors="pt"
+    )
+    
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir=f"{config['output_dir']}/leave_out_{held_out_fold_name}",
+        per_device_train_batch_size=config['batch_size'],
+        per_device_eval_batch_size=config['eval_batch_size'],
+        gradient_accumulation_steps=config['gradient_accumulation_steps'],
+        max_steps=config['max_steps'],
+        learning_rate=config['learning_rate'],
+        save_strategy="steps",
+        eval_strategy="steps",
+        save_steps=20,
+        eval_steps=20,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        save_total_limit=2,
+        logging_steps=5,
+        bf16=True,
+        dataloader_pin_memory=False,
+        dataloader_num_workers=4,
+        remove_unused_columns=False,
+        weight_decay=config['weight_decay'],
+        warmup_ratio=config['warmup_ratio'],
+        report_to="wandb",
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        dataloader_drop_last=True,
+        optim="adamw_torch_fused",
+        max_grad_norm=1.0,
+        tf32=True,
+    )
+    
+    # Create callback output directory BEFORE creating callbacks
+    callback_output_dir = f"{config['output_dir']}/leave_out_{held_out_fold_name}"
+    os.makedirs(callback_output_dir, exist_ok=True)
+    
+    # Create custom callbacks AFTER tokenizer is initialized
+    downsampled_eval_callback = DownsampledEvaluationCallback(
+        all_fold_data=all_fold_data,
+        tokenizer=tokenizer,
+        output_dir=callback_output_dir,
+        max_samples_per_fold=100,
+        eval_steps=training_args.eval_steps
+    )
+    
+    downsampled_early_stopping = DownsampledEarlyStoppingCallback(
+        early_stopping_patience=5,
+        early_stopping_threshold=0.00001
+    )
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=data_collator,
+        callbacks=[downsampled_eval_callback, downsampled_early_stopping]
+    )
+    
+    # Train
+    print("Starting training...")
+    trainer.train()
+    wandb.finish()
+    print("Training finished")
+    
+    # Evaluate on the held-out fold
+    print(f"Starting evaluation on held-out fold: {held_out_fold_name}")
+    
+    results = evaluate_model_comprehensive2(
+        model, tokenizer, eval_data, 
+        f"leave_out_{held_out_fold_name}_eval", 
+        config['output_dir']
+    )
+    
+    # Add metadata
+    results['held_out_fold'] = held_out_fold_name
+    results['training_folds'] = training_fold_names
+    results['training_examples'] = len(train_data)
+    results['eval_examples'] = len(eval_data)
+    
+    print(f"Held-out fold {held_out_fold_name} - Accuracy: {results['accuracy']:.3f}, F1: {results['f1_weighted']:.3f}")
+    
+    # Cleanup
+    del model, trainer, train_dataset, eval_dataset
+    torch.cuda.empty_cache()
+    
+    return results, run_url
 
 
 def train_and_evaluate_all(train_fold_name, all_fold_data, config):
@@ -345,6 +901,7 @@ def train_and_evaluate_all(train_fold_name, all_fold_data, config):
         device_map="auto",
         trust_remote_code=True,
         low_cpu_mem_usage=True,
+        attn_implementation="flash_attention_2"
     )
     
     # Disable KV cache and enable gradient checkpointing
@@ -364,6 +921,9 @@ def train_and_evaluate_all(train_fold_name, all_fold_data, config):
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
     model = get_peft_model(model, peft_config)
+
+    # model = torch.compile(model, mode="reduce-overhead")
+
     
     # Show example formatting
     if len(train_data) > 0:
@@ -412,38 +972,59 @@ def train_and_evaluate_all(train_fold_name, all_fold_data, config):
         learning_rate=config['learning_rate'],
         save_strategy="steps",
         eval_strategy="steps",
-        save_steps=50,
-        eval_steps=50,
+        save_steps=20,
+        eval_steps=20,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         save_total_limit=2,
-        logging_steps=10,
+        logging_steps=5,
         bf16=True,
         dataloader_pin_memory=False,
-        dataloader_num_workers=0,
+        dataloader_num_workers=4,
         remove_unused_columns=False,
         weight_decay=config['weight_decay'],
         warmup_ratio=config['warmup_ratio'],
         report_to="wandb",
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         dataloader_drop_last=True,
         optim="adamw_torch_fused",
         max_grad_norm=1.0,
+        tf32=True,  # 30-50% speedup on compatible GPUs
+
     )
     
-    # Create trainer
+
+    # Create callback output directory BEFORE creating callbacks
+    callback_output_dir = f"{config['output_dir']}/train_on_{train_fold_name}"
+    os.makedirs(callback_output_dir, exist_ok=True)
+    
+    # Create custom callbacks AFTER tokenizer is initialized
+    downsampled_eval_callback = DownsampledEvaluationCallback(
+        all_fold_data=all_fold_data,
+        tokenizer=tokenizer,
+        output_dir=callback_output_dir,
+        max_samples_per_fold=100,  # Can be made configurable
+        eval_steps=training_args.eval_steps  # Use from training arguments
+    )
+    
+    downsampled_early_stopping = DownsampledEarlyStoppingCallback(
+        early_stopping_patience=5,
+        early_stopping_threshold=0.0001
+    )
+    
+
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        callbacks=[EarlyStoppingCallback(
-            early_stopping_patience=3,
-            early_stopping_threshold=0.01
-        )]
-    )
+            callbacks=[downsampled_eval_callback, downsampled_early_stopping]  # Use custom callbacks
+        )
+    
     
     # Train
     print("Starting training...")
@@ -488,6 +1069,127 @@ def train_and_evaluate_all(train_fold_name, all_fold_data, config):
     torch.cuda.empty_cache()
     
     return fold_results, run_url
+
+def run_leave_one_out(input_path, config):
+    """Run leave-one-out cross-validation: train on all but one fold, evaluate on the held-out fold"""
+    input_path = Path(input_path)
+    
+    # Find all fold directories
+    fold_dirs = [d for d in input_path.iterdir() if d.is_dir()]
+    fold_names = [d.name for d in fold_dirs]
+    
+    print(f"Found {len(fold_names)} folds: {fold_names}")
+    
+    # Load all data
+    all_fold_data = {}
+    for fold_dir in fold_dirs:
+        fold_name = fold_dir.name
+        train_file = fold_dir / "train.jsonl"
+        test_file = fold_dir / "test.jsonl"
+        
+        if not train_file.exists() or not test_file.exists():
+            print(f"Warning: Missing files in {fold_name}, skipping")
+            continue
+            
+        train_data = load_jsonl(train_file)
+        test_data = load_jsonl(test_file)
+        
+        all_fold_data[fold_name] = {
+            'train': train_data,
+            'test': test_data
+        }
+        
+        print(f"Loaded {fold_name}: {len(train_data)} train, {len(test_data)} test")
+    
+    # Results for each held-out fold
+    all_results = {}
+    all_run_urls = {}
+    
+    # For each fold, use it as held-out and train on all others
+    for held_out_fold_name in all_fold_data.keys():
+        print(f"\n{'='*80}")
+        print(f"LEAVE-ONE-OUT: HOLDING OUT FOLD {held_out_fold_name}")
+        print(f"{'='*80}")
+        
+        # Calculate training data size
+        total_train_size = 0
+        training_folds = []
+        for fold_name, fold_data in all_fold_data.items():
+            if fold_name != held_out_fold_name:
+                fold_size = len(fold_data['train']) + len(fold_data['test'])
+                total_train_size += fold_size
+                training_folds.append(f"{fold_name}({fold_size})")
+        
+        eval_size = len(all_fold_data[held_out_fold_name]['train']) + len(all_fold_data[held_out_fold_name]['test'])
+        
+        print(f"Training on {total_train_size} examples from folds: {', '.join(training_folds)}")
+        print(f"Evaluating on {eval_size} examples from held-out fold: {held_out_fold_name}")
+        
+        # Train on all folds except held_out_fold_name
+        results, run_url = train_all_but_one_and_evaluate(
+            held_out_fold_name, all_fold_data, config
+        )
+        
+        all_results[held_out_fold_name] = results
+        all_run_urls[held_out_fold_name] = run_url
+        
+        # Print summary for this held-out fold
+        print(f"\nSummary for held-out fold {held_out_fold_name}:")
+        print(f"  Accuracy: {results['accuracy']:.3f}")
+        print(f"  F1 Score: {results['f1_weighted']:.3f}")
+        print(f"  Precision: {results['precision_weighted']:.3f}")
+        print(f"  Recall: {results['recall_weighted']:.3f}")
+    
+    # Calculate overall statistics
+    print(f"\n{'='*80}")
+    print(f"LEAVE-ONE-OUT CROSS-VALIDATION SUMMARY")
+    print(f"{'='*80}")
+    
+    # Collect all metrics
+    accuracies = []
+    f1_scores = []
+    precisions = []
+    recalls = []
+    
+    print("\nResults by held-out fold:")
+    for held_out_fold, results in all_results.items():
+        acc = results['accuracy']
+        f1 = results['f1_weighted']
+        prec = results['precision_weighted']
+        rec = results['recall_weighted']
+        
+        accuracies.append(acc)
+        f1_scores.append(f1)
+        precisions.append(prec)
+        recalls.append(rec)
+        
+        print(f"  {held_out_fold:15s} - Acc: {acc:.3f}, F1: {f1:.3f}, Prec: {prec:.3f}, Rec: {rec:.3f}")
+    
+    # Calculate and print averages
+    if accuracies:
+        print(f"\nCross-validation averages ({len(accuracies)} folds):")
+        print(f"  Accuracy:  {np.mean(accuracies):.3f} ± {np.std(accuracies):.3f}")
+        print(f"  F1 Score:  {np.mean(f1_scores):.3f} ± {np.std(f1_scores):.3f}")
+        print(f"  Precision: {np.mean(precisions):.3f} ± {np.std(precisions):.3f}")
+        print(f"  Recall:    {np.mean(recalls):.3f} ± {np.std(recalls):.3f}")
+        
+        # Additional statistics
+        print(f"\nAdditional statistics:")
+        print(f"  Min Accuracy: {min(accuracies):.3f} (fold: {list(all_results.keys())[accuracies.index(min(accuracies))]})")
+        print(f"  Max Accuracy: {max(accuracies):.3f} (fold: {list(all_results.keys())[accuracies.index(max(accuracies))]})")
+        print(f"  Range: {max(accuracies) - min(accuracies):.3f}")
+        
+        # Confidence interval (assuming normal distribution)
+        from scipy import stats
+        try:
+            acc_ci = stats.t.interval(0.95, len(accuracies)-1, loc=np.mean(accuracies), scale=stats.sem(accuracies))
+            f1_ci = stats.t.interval(0.95, len(f1_scores)-1, loc=np.mean(f1_scores), scale=stats.sem(f1_scores))
+            print(f"  95% CI Accuracy: [{acc_ci[0]:.3f}, {acc_ci[1]:.3f}]")
+            print(f"  95% CI F1 Score: [{f1_ci[0]:.3f}, {f1_ci[1]:.3f}]")
+        except ImportError:
+            print("  (Install scipy for confidence intervals)")
+    
+    return all_results, all_run_urls
 
 
 def run_train_one_eval_all(input_path, config):
@@ -636,15 +1338,27 @@ def run_train_one_eval_all(input_path, config):
     
     return all_training_results, all_run_urls
 
-
 def main():
+    optimize_environment()
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train lie detection models with different training strategies')
+    parser.add_argument('--learning_rate', type=float, default=2e-4, help='Learning rate for training (default: 2e-4)')
+    parser.add_argument('--base_input_path', type=str, 
+                    default="/workspace/lie-detector/organized_balanced_training_20250730_135859_cleaned",
+                    help='Base input path containing model directories')
+    parser.add_argument('--strategy', type=str, choices=['train_one_eval_all', 'leave_one_out', 'both'], 
+                    default='both', help='Training strategy to use (default: both)')
+    args = parser.parse_args()
+    
     # Set environment variables for better memory management
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
     
     # Base input path
-    base_input_path = "/workspace/lie-detector/organized_balanced_training_20250727_201402_cleaned"
+    base_input_path = args.base_input_path
+    
     # Get all model subdirectories
     model_dirs = [d for d in os.listdir(base_input_path) if os.path.isdir(os.path.join(base_input_path, d)) and d.startswith('openrouter_google_gemma-3-')]
     
@@ -661,37 +1375,36 @@ def main():
     
     # Configuration (defined outside the loop)
     config = {
-        'learning_rate': 2e-4,
+        'learning_rate': args.learning_rate,
         'batch_size': 8,
-        'eval_batch_size': 16,  # Larger batch size for evaluation
+        'eval_batch_size': 8,
         'lora_r': 8,
         'lora_alpha': 16,
-        'lora_dropout': 0.05,
+        'lora_dropout': 0.01,
         'gradient_accumulation_steps': 2,
-        'weight_decay': 0.01,
+        'weight_decay': 0.1,
         'warmup_ratio': 0.03,
-        'max_length': 2675,
+        'max_length': 3072,
+        'num_train_epochs': 5,
     }
     
-    # Extract timestamp from the input path instead of generating a new one
+    # Extract timestamp from the input path
     import re
     timestamp_match = re.search(r'(\d{8}_\d{6})', base_input_path)
     if timestamp_match:
         timestamp = timestamp_match.group(1)
         print(f"Using timestamp from input path: {timestamp}")
     else:
-        # Fallback to current timestamp if not found in path
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         print(f"Timestamp not found in input path, using current time: {timestamp}")
-    
+        
     for model_dir in model_dirs:
         print(f"\n{'='*80}")
         print(f"Processing model: {model_dir}")
         print(f"{'='*80}")
         
-        # Construct the folds directory path based on whether there's a _train_[number] suffix
+        # Construct the folds directory path
         if "_train_" in base_input_path:
-            import re
             train_match = re.search(r'_train_\d+', base_input_path)
             if train_match:
                 train_suffix = train_match.group()
@@ -720,25 +1433,11 @@ def main():
                     'test': test_data
                 }
         
-        max_steps = calculate_max_steps(all_fold_data)
-        
-        # Create output directory
-        output_dir = f"./outputs/{timestamp}/lr_{config['learning_rate']}/{model_dir}_train_one_eval_all_{timestamp}"
-        
-        # Check if base input path contains _train_[number] pattern
-        if "_train_" in base_input_path:
-            import re
-            train_match = re.search(r'_train_\d+', base_input_path)
-            if train_match:
-                train_suffix = train_match.group()
-                output_dir = f"./outputs/{timestamp}{train_suffix}/lr_{config['learning_rate']}/{model_dir}_train_one_eval_all_{timestamp}"
-        
-        os.makedirs(output_dir, exist_ok=True)
+        max_steps = calculate_max_steps(all_fold_data, scaler=5)  # Back to 2
         
         # Update config with model-specific values
         config.update({
             'model_name': model_name_map[model_dir],
-            'output_dir': output_dir,
             'max_steps': max_steps,
         })
         
@@ -746,33 +1445,115 @@ def main():
         for key, value in config.items():
             print(f"  {key}: {value}")
         
-        # Run train-on-one, evaluate-on-all
-        all_results, all_run_urls = run_train_one_eval_all(input_path, config)
+        # Initialize result variables
+        train_one_results_data = None
+        leave_one_out_results_data = None
         
-        # Save comprehensive results
-        results = {
-            'config': config,
-            'all_training_results': all_results,
-            'all_run_urls': all_run_urls,
-            'timestamp': timestamp,
-            'input_path': input_path,
-            'method': 'train_one_evaluate_all',
-        }
+        # Run selected training strategy(ies)
+        if args.strategy in ['train_one_eval_all', 'both']:
+            print(f"\n{'='*80}")
+            print(f"RUNNING TRAIN-ONE-EVAL-ALL STRATEGY")
+            print(f"{'='*80}")
+            
+            # Create output directory for train-one-eval-all
+            output_dir = f"./outputs/{timestamp}/lr_{config['learning_rate']}/{model_dir}_train_one_eval_all_{timestamp}"
+            
+            # Check if base input path contains _train_[number] pattern
+            if "_train_" in base_input_path:
+                train_match = re.search(r'_train_\d+', base_input_path)
+                if train_match:
+                    train_suffix = train_match.group()
+                    output_dir = f"./outputs/{timestamp}{train_suffix}/lr_{config['learning_rate']}/{model_dir}_train_one_eval_all_{timestamp}"
+            
+            os.makedirs(output_dir, exist_ok=True)
+            config['output_dir'] = output_dir
+            
+            # Run train-on-one, evaluate-on-all
+            train_one_results, train_one_urls = run_train_one_eval_all(input_path, config)
+            
+            # Save comprehensive results
+            train_one_results_data = {
+                'config': config.copy(),
+                'all_training_results': train_one_results,
+                'all_run_urls': train_one_urls,
+                'timestamp': timestamp,
+                'input_path': input_path,
+                'method': 'train_one_evaluate_all',
+            }
+            
+            results_file = f"{output_dir}/train_one_eval_all_results.json"
+            with open(results_file, 'w') as f:
+                json.dump(train_one_results_data, f, indent=2)
+            
+            print(f"\nTrain-one-eval-all results saved to: {results_file}")
         
-        results_file = f"{output_dir}/train_one_eval_all_results.json"
-        with open(results_file, 'w') as f:
-            json.dump(results, f, indent=2)
+        if args.strategy in ['leave_one_out', 'both']:
+            print(f"\n{'='*80}")
+            print(f"RUNNING LEAVE-ONE-OUT STRATEGY")
+            print(f"{'='*80}")
+            
+            # Create output directory for leave-one-out
+            output_dir = f"./outputs/{timestamp}/lr_{config['learning_rate']}/{model_dir}_leave_one_out_{timestamp}"
+            
+            # Check if base input path contains _train_[number] pattern
+            if "_train_" in base_input_path:
+                train_match = re.search(r'_train_\d+', base_input_path)
+                if train_match:
+                    train_suffix = train_match.group()
+                    output_dir = f"./outputs/{timestamp}{train_suffix}/lr_{config['learning_rate']}/{model_dir}_leave_one_out_{timestamp}"
+            
+            os.makedirs(output_dir, exist_ok=True)
+            config['output_dir'] = output_dir
+            
+            # Run leave-one-out cross-validation
+            leave_one_out_results, leave_one_out_urls = run_leave_one_out(input_path, config)
+            
+            # Save comprehensive results
+            leave_one_out_results_data = {
+                'config': config.copy(),
+                'all_results': leave_one_out_results,
+                'all_run_urls': leave_one_out_urls,
+                'timestamp': timestamp,
+                'input_path': input_path,
+                'method': 'leave_one_out',
+            }
+            
+            results_file = f"{output_dir}/leave_one_out_results.json"
+            with open(results_file, 'w') as f:
+                json.dump(leave_one_out_results_data, f, indent=2)
+            
+            print(f"\nLeave-one-out results saved to: {results_file}")
         
-        all_model_results[model_dir] = results
-        print(f"\nComprehensive results saved to: {results_file}")
+        # Store results for this model - FIXED
+        model_results = {}
+        if train_one_results_data is not None:
+            model_results['train_one_eval_all'] = train_one_results_data
+        if leave_one_out_results_data is not None:
+            model_results['leave_one_out'] = leave_one_out_results_data
+        
+        all_model_results[model_dir] = model_results
     
     # Save combined results
-    combined_results_file = f"{output_dir}/all_models_train_one_eval_all_{timestamp}.json"
+    if args.strategy == 'both':
+        combined_results_file = f"./outputs/{timestamp}/lr_{config['learning_rate']}/all_models_both_strategies_{timestamp}.json"
+    else:
+        combined_results_file = f"./outputs/{timestamp}/lr_{config['learning_rate']}/all_models_{args.strategy}_{timestamp}.json"
+    
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(combined_results_file), exist_ok=True)
+    
     with open(combined_results_file, 'w') as f:
         json.dump(all_model_results, f, indent=2)
     
     print(f"\nCombined results saved to: {combined_results_file}")
-
+    
+    # Print final summary
+    print(f"\n{'='*80}")
+    print(f"FINAL SUMMARY")
+    print(f"{'='*80}")
+    print(f"Processed {len(model_dirs)} models with strategy: {args.strategy}")
+    print(f"Learning rate: {config['learning_rate']}")
+    print(f"Results saved to: {combined_results_file}")
 
 if __name__ == "__main__":
     main()
