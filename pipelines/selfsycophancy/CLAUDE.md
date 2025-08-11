@@ -1,5 +1,3 @@
-You’re very close to measuring something meaningful, but there are several conceptual, experimental-design, and implementation issues that will give you misleading results or make the outputs fragile. Below are the main methodological flaws and concrete improvements, grouped so you can prioritize.
-
 High-level conceptual issues
 
 What you’re actually measuring: The current “correctness” pipeline measures post-choice confidence inflation (choice-supportive bias / self-justification), not self-sycophancy in the usual sense (agreeing with a user’s stated beliefs/preferences). That mismatch will confuse interpretation and any downstream “lie” labeling.

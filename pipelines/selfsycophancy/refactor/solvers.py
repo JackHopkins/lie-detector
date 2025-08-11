@@ -119,7 +119,7 @@ async def run_assessment(
     state.messages.append(ChatMessageUser(content=build_assessment_user_prompt(
         question, options, domain.property_name, domain.high_is_better)))
     try:
-        state = await generate(state, temperature=temperature, max_tokens=2000)
+        state = await generate(state, temperature=temperature, max_tokens=3000)
     except Exception as e:
         pass
 
@@ -150,7 +150,7 @@ async def run_choice(
     state.messages = [ChatMessageSystem(content=CHOOSER_SYSTEM)]
     state.messages.append(ChatMessageUser(content=build_choice_user_prompt(
         question, options, domain.choice_instruction())))
-    state = await generate(state, temperature=temperature, max_tokens=2000, logprobs=True, top_logprobs=20)
+    state = await generate(state, temperature=temperature, max_tokens=3000, logprobs=True, top_logprobs=20)
 
     choice_text = getattr(state.output, "completion", "") or ""
     choice_letter = parse_letter_choice(choice_text) or "A"

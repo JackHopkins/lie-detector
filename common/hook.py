@@ -92,18 +92,28 @@ class BaseSampleProcessingHook(Hooks):
             sample_info = []  # Keep track of sample info for error reporting
 
             for sample in samples:
-                parsed_sample = self.process_sample(sample, eval_log)
-                if parsed_sample:
+                parsed_samples = self.process_sample(sample, eval_log)
+                if not isinstance(parsed_samples, list):
+                    parsed_samples = [parsed_samples]
+
+                for parsed_sample in parsed_samples:
+                    task_name = parsed_sample['task']
                     # Convert to dict for JSON serialization
                     if isinstance(parsed_sample, LieDetectionSample):
+                        # Prepare upload task
+                        sample_id = parsed_sample.sample_id
                         parsed_entry = parsed_sample.dict(exclude_none=True)
+                        all_entries.append(parsed_entry)
                     else:
-                        pass
+                        # Prepare upload task
+                        sample_id = parsed_sample['sample_id']
+                        parsed_entry = parsed_sample
 
                     all_entries.append(parsed_entry)
 
-                    # Prepare upload task
-                    sample_id = parsed_sample.sample_id
+
+
+
                     sample_info.append(sample_id)
 
                     upload_task = self.upload_sample_async(
@@ -180,7 +190,10 @@ class BaseSampleProcessingHook(Hooks):
             try:
                 parsed = self.process_sample(sample, eval_log)
                 if parsed:
-                    self.results.append(parsed)
+                    if isinstance(parsed, list):
+                        self.results.extend(parsed)
+                    else:
+                        self.results.append(parsed)
             except Exception as e:
                 print(f"[{self.__class__.__name__}] Error processing sample: {e}")
 

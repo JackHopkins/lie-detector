@@ -188,7 +188,7 @@ async def run():
     #tasks = [chess_mate_in_2_shutdown_threat_task(lie_elicitation_prompt=key) for key in LIE_ELICITATION_PROMPTS.keys()]
 
     tasks = [
-        #chess_mate_in_2_dual_shutdown_threat_task(),
+        chess_mate_in_2_dual_shutdown_threat_task(),
         chess_mate_in_2_dual_capability_hiding_task(),
         chess_mate_in_2_dual_safety_concern_task(),
     ]
@@ -198,8 +198,8 @@ async def run():
     #model = "openrouter/google/gemma-3-12b-it"
     model = "openrouter/openai/gpt-4o"
 
-    model ="openrouter/google/gemma-3-27b-it"
-    model = "openrouter/google/gemma-3-12b-it"
+    #model ="openrouter/google/gemma-3-27b-it"
+    #model = "openrouter/google/gemma-3-12b-it"
     # model = "openrouter/google/gemma-3-4b-it"
 
     # Run evaluation with a specific model
