@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+# Set the log directory to be within baseline_new instead of .data
+current_dir = os.path.dirname(os.path.abspath(__file__))
+os.environ["INSPECT_LOG_DIR"] = os.path.join(current_dir, "logs")
 
 # Add the parent directory to Python path to ensure baseline module can be imported
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -19,10 +22,8 @@ if parent_dir not in sys.path:
 
 # Configuration
 ORGANIZED_DIR = "/Users/dipikakhullar/Desktop/lie-detector/.data/google"
-NUM_SAMPLES = 10  # Set to a number to limit samples, or None for all
-# BASELINE_TYPES = [ "llama_chat"]
-BASELINE_TYPES = ["rowans_escaped_transcript", "llama_chat_reasoning"]
-# BASELINE_TYPES = ["base_transcript"]
+NUM_SAMPLES = 10 # Set to a number to limit samples, or None for all
+BASELINE_TYPES = ["llama_chat", "base_transcript", "rowans_escaped_transcript"]
 EVALUATION_MODES = ["folds_colors"]
 
 def load_model_mapping(organized_dir: Path) -> dict:

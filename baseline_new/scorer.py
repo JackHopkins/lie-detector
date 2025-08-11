@@ -1,5 +1,6 @@
 from inspect_ai.scorer import Score, scorer, accuracy, mean, Scorer, Target
 from inspect_ai.solver import TaskState
+from typing import Dict, Any
 import re
 
 @scorer(metrics=[accuracy(), mean()])
@@ -7,7 +8,7 @@ def truth_scorer() -> Scorer:
     """
     Scorer that calculates accuracy, precision, recall, and F1 score components.
     """
-    async def score(state: TaskState, target: Target) -> Score:
+    async def score(state: TaskState, target: Target, raw_data: Dict[str, Any] = None) -> Score:
         completion = state.output.completion.strip()
         
         # Improved parsing logic with priority order
@@ -81,7 +82,7 @@ def escaped_transcript_scorer() -> Scorer:
     Scorer that extracts scores from <score> tags and calculates lie detection metrics.
     Expects target to be Alie) or 'B' (truthful).
     """
-    async def score(state: TaskState, target: Target) -> Score:
+    async def score(state: TaskState, target: Target, raw_data: Dict[str, Any] = None) -> Score:
         completion = state.output.completion.strip()
         # print("[DEBUG] Raw model output:", repr(completion))
         
@@ -150,7 +151,7 @@ def llama_chat_scorer() -> Scorer:
     Scorer for LLaMA chat baseline that extracts A/B answers.
     Uses the same logic as truth_scorer since both ask for A/B responses.
     """
-    async def score(state: TaskState, target: Target) -> Score:
+    async def score(state: TaskState, target: Target, raw_data: Dict[str, Any] = None) -> Score:
         completion = state.output.completion.strip()
         
         # Improved parsing logic with priority order (same as truth_scorer)
@@ -224,7 +225,7 @@ def llama_chat_reasoning_scorer() -> Scorer:
     Scorer for LLaMA chat reasoning baseline that extracts A/B answers from <answer> tags.
     Uses the same logic as llama_chat_scorer but prioritizes <answer> tags.
     """
-    async def score(state: TaskState, target: Target) -> Score:
+    async def score(state: TaskState, target: Target, raw_data: Dict[str, Any] = None) -> Score:
         completion = state.output.completion.strip()
         
         # Improved parsing logic with priority order (same as llama_chat_scorer)
@@ -298,7 +299,7 @@ def base_transcript_reasoning_scorer() -> Scorer:
     Scorer for base transcript reasoning baseline that extracts A/B answers from <answer> tags.
     Uses the same logic as truth_scorer but prioritizes <answer> tags.
     """
-    async def score(state: TaskState, target: Target) -> Score:
+    async def score(state: TaskState, target: Target, raw_data: Dict[str, Any] = None) -> Score:
         completion = state.output.completion.strip()
         
         # Improved parsing logic with priority order (same as truth_scorer)

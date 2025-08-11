@@ -44,7 +44,7 @@ def escaped_transcript_task(
     return Task(
         dataset=conversation_dataset(data_dir, limit=limit),
         solver=generate(),
-        scorer=escaped_transcript_scorer(),
+        scorer=escaped_transcript_scorer()
     ) 
 
 @task
@@ -72,7 +72,7 @@ def llama_chat_reasoning_task(
     return Task(
         dataset=llama_chat_reasoning_dataset(data_dir, limit=limit),
         solver=generate(),
-        scorer=llama_chat_reasoning_scorer(),
+        scorer=llama_chat_reasoning_scorer()
     )
 
 @task
@@ -86,7 +86,7 @@ def base_transcript_reasoning_task(
     return Task(
         dataset=base_transcript_reasoning_dataset(data_dir, limit=limit),
         solver=generate(),
-        scorer=base_transcript_reasoning_scorer(),
+        scorer=base_transcript_reasoning_scorer()
     )
 
 @task
@@ -117,7 +117,7 @@ def baseline_task_by_model(
         model_tasks[model] = Task(
             dataset=dataset,
             solver=generate(),
-            scorer=truth_scorer()
+            scorer=truth_scorer(),
         )
     
     return model_tasks
@@ -136,7 +136,7 @@ def baseline_task_by_model_from_file(
         model_tasks[model] = Task(
             dataset=dataset,
             solver=generate(),
-            scorer=truth_scorer()
+            scorer=truth_scorer(),
         )
     
     return model_tasks
@@ -155,7 +155,7 @@ def escaped_transcript_task_by_model(
         model_tasks[model] = Task(
             dataset=dataset,
             solver=generate(),
-            scorer=escaped_transcript_scorer()
+            scorer=escaped_transcript_scorer(),
         )
     
     return model_tasks
@@ -174,7 +174,7 @@ def escaped_transcript_task_by_model_from_file(
         model_tasks[model] = Task(
             dataset=dataset,
             solver=generate(),
-            scorer=escaped_transcript_scorer()
+            scorer=escaped_transcript_scorer(),
         )
     
     return model_tasks
@@ -196,7 +196,7 @@ def llama_chat_task_by_model(
             scorer=llama_chat_scorer()
         )
     
-        return model_tasks
+    return model_tasks
 
 def llama_chat_task_by_model_from_file(
     data_file: str, 

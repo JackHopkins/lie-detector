@@ -355,7 +355,11 @@ def create_llama_chat_samples(dataset: List[Dict[str, Any]]) -> List[Sample]:
         })
 
         target = "A" if item.get("meta", {}).get("did_lie", item.get("did_lie")) else "B"
-        samples.append(Sample(input=messages, target=target, metadata=item))
+        
+        # Store the raw input sample in metadata for access in scorers
+        metadata = item.copy()
+        metadata['raw_input_sample'] = item
+        samples.append(Sample(input=messages, target=target, metadata=metadata))
     return samples
 
 
@@ -586,7 +590,11 @@ def create_llama_chat_reasoning_samples(dataset: List[Dict[str, Any]]) -> List[S
         })
 
         target = "A" if item.get("meta", {}).get("did_lie", item.get("did_lie")) else "B"
-        samples.append(Sample(input=messages, target=target, metadata=item))
+        
+        # Store the raw input sample in metadata for access in scorers
+        metadata = item.copy()
+        metadata['raw_input_sample'] = item
+        samples.append(Sample(input=messages, target=target, metadata=metadata))
     return samples
 
 

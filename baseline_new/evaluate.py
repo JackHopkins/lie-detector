@@ -114,7 +114,7 @@ def save_prompts_to_file(results, filename, output_dir=".", baseline_type="basel
         for i, sample in enumerate(results):
             target = sample.target
             prediction = sample.output.completion.strip()
-            original_did_lie = sample.metadata.get('did_lie', 'N/A')
+            groundtruth_did_lie = sample.metadata.get('meta', {}).get('did_lie', sample.metadata.get('did_lie', 'N/A'))
 
             # Get extracted prediction from scorer
             if baseline_type == "escaped_transcript":
@@ -141,7 +141,7 @@ def save_prompts_to_file(results, filename, output_dir=".", baseline_type="basel
             f.write("-" * 50 + "\n")
             f.write(f"Target: {target}\n")
             f.write(f"Extracted Prediction: {extracted_pred}\n")
-            f.write(f"Original did_lie: {original_did_lie}\n")
+            f.write(f"Groundtruth did_lie: {groundtruth_did_lie}\n")
             f.write(f"Parseable: {is_parseable}\n")
             f.write("-" * 50 + "\n")
 
@@ -232,7 +232,7 @@ def save_results_to_files(results, filename, metrics, output_dir=".", baseline_t
 
         target = sample.target
         prediction = sample.output.completion.strip()
-        original_did_lie = sample.metadata.get('did_lie', 'N/A')
+        groundtruth_did_lie = sample.metadata.get('meta', {}).get('did_lie', sample.metadata.get('did_lie', 'N/A'))
 
         if baseline_type == "escaped_transcript":
             scorer_name = 'escaped_transcript_scorer'
@@ -248,18 +248,29 @@ def save_results_to_files(results, filename, metrics, output_dir=".", baseline_t
             scorer_name = 'truth_scorer'
         if hasattr(sample, 'scores') and sample.scores and scorer_name in sample.scores:
             extracted_pred = sample.scores[scorer_name].answer
-            metadata = sample.scores[scorer_name].metadata
-            is_parseable = metadata.get('parseable', True) if metadata else False
+            scorer_metadata = sample.scores[scorer_name].metadata
+            is_parseable = scorer_metadata.get('parseable', True) if scorer_metadata else False
         else:
             extracted_pred = "OTHER"
             is_parseable = False
 
+        # Get the actual sample_id from the original sample metadata
+        actual_sample_id = sample.metadata.get('meta', {}).get('sample_id', sample.metadata.get('sample_id', sample.metadata.get('id', f'sample_{i+1}')))
+        
+        # Get the task name from the subtask we extracted
+        task_name = subtask
+        
+        # Get task_id from the original sample metadata
+        task_id = sample.metadata.get('meta', {}).get('task_id', sample.metadata.get('task_id', f'{baseline_type}_{task_name}'))
+        
         sample_data = {
-            "sample_id": i + 1,
+            "sample_id": actual_sample_id,
+            "task": task_name,
+            "task_id": task_id,
             "target": target,
             "extracted_prediction": extracted_pred,
             "raw_prediction": prediction,
-            "original_did_lie": original_did_lie,
+            "groundtruth_did_lie": groundtruth_did_lie,
             "is_parseable": is_parseable,
             "correct": target == extracted_pred if is_parseable else None
         }
@@ -326,7 +337,13 @@ def save_results_to_files(results, filename, metrics, output_dir=".", baseline_t
             "timestamp": timestamp,
             "total_samples": len(results),
             "model": model_name,
-            "subtasks": list(subtask_results.keys())
+            "baseline_type": baseline_type,
+            "subtasks": list(subtask_results.keys()),
+            "task_info": {
+                "baseline_type": baseline_type,
+                "subtask_count": len(subtask_results),
+                "subtask_names": list(subtask_results.keys())
+            }
         },
         "overall_metrics": {
             "parseable_samples": overall_parseable,
@@ -462,7 +479,7 @@ def main(num_samples=None, model=None, data_dir="processed_data", baseline_type=
             limit=limit
         )
 
-    # Set baseline_type in environment for hook to access
+            # Set baseline_type in environment for evaluation
     os.environ['BASELINE_TYPE'] = baseline_type
     print(f"[evaluate.py main] Set BASELINE_TYPE environment variable to: '{baseline_type}'")
     
@@ -492,7 +509,7 @@ def main(num_samples=None, model=None, data_dir="processed_data", baseline_type=
     for i, sample in enumerate(results):
         target = sample.target
         prediction = sample.output.completion.strip()
-        original_did_lie = sample.metadata.get('did_lie', 'N/A')
+        groundtruth_did_lie = sample.metadata.get('meta', {}).get('did_lie', sample.metadata.get('did_lie', 'N/A'))
 
         # Extract A/B from prediction (our scorer should handle this)
         if baseline_type == "escaped_transcript":
@@ -526,7 +543,7 @@ def main(num_samples=None, model=None, data_dir="processed_data", baseline_type=
                 'sample_num': i + 1,
                 'target': target_str,
                 'raw_output': prediction[:100] + "..." if len(prediction) > 100 else prediction,
-                'did_lie': original_did_lie
+                'did_lie': groundtruth_did_lie
             })
         else:
             parseable_samples.append(sample)
@@ -539,7 +556,7 @@ def main(num_samples=None, model=None, data_dir="processed_data", baseline_type=
                         'target': target_str,
                         'prediction': extracted_pred,
                         'raw_output': prediction[:100] + "..." if len(prediction) > 100 else prediction,
-                        'did_lie': original_did_lie
+                        'did_lie': groundtruth_did_lie
                     })
 
     print(f"\n=== FILTERING SUMMARY ===")
@@ -705,12 +722,11 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
 
         print(f"Using evaluation model: {eval_model}")
         
-        # Set baseline_type in environment for hook to access
+        # Set baseline_type in environment for evaluation
         os.environ['BASELINE_TYPE'] = baseline_type
         print(f"[evaluate.py] Set BASELINE_TYPE environment variable to: '{baseline_type}'")
         
-        # Import our baseline hook
-        import baseline_hook
+        # No hooks - simple evaluation only
         
         log = eval(task, model=eval_model, log_dir=model_log_dir)
         results = log[0].samples if log and log[0].samples else []
@@ -741,7 +757,7 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
         for i, sample in enumerate(results):
             target = sample.target
             prediction = sample.output.completion.strip()
-            original_did_lie = sample.metadata.get('did_lie', 'N/A')
+            groundtruth_did_lie = sample.metadata.get('meta', {}).get('did_lie', sample.metadata.get('did_lie', 'N/A'))
 
             # Extract A/B from prediction
             if baseline_type == "escaped_transcript":
@@ -775,7 +791,7 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
                     'sample_num': i + 1,
                     'target': target_str,
                     'raw_output': prediction[:100] + "..." if len(prediction) > 100 else prediction,
-                    'did_lie': original_did_lie
+                    'did_lie': groundtruth_did_lie
                 })
             else:
                 parseable_samples.append(sample)
@@ -788,7 +804,7 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
                             'target': target_str,
                             'prediction': extracted_pred,
                             'raw_output': prediction[:100] + "..." if len(prediction) > 100 else prediction,
-                            'did_lie': original_did_lie
+                            'did_lie': groundtruth_did_lie
                         })
 
         print(f"\n=== {model_key.upper()} FILTERING SUMMARY ===")
@@ -857,7 +873,6 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
                                                             eval_model)
         print(f"📝 Saved results to: {json_filepath}")
         print(f"📝 Saved summary to: {txt_filepath}")
-
     # Print overall summary
     print(f"\n{'=' * 80}")
     print("OVERALL SUMMARY BY MODEL")
