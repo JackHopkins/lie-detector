@@ -117,7 +117,7 @@ if __name__ == "__main__":
                ],
         model=model,  # or any model you want to test
         limit=100,  # Limit samples for faster debugging
-        log_dir="../logs",  # Optional: specify log directory
+        log_dir="../unanswerable/logs",  # Optional: specify log directory
         retry_on_error=5
         # debug_errors=True,  # Optional: enable debug mode
     )

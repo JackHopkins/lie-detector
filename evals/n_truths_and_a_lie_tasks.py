@@ -194,6 +194,6 @@ if __name__ == "__main__":
         tasks=task,
         model=model,  # Using OpenRouter model
         limit=1,  # Limit samples for faster debugging
-        log_dir="../logs",  # Specify log directory
+        log_dir="../games/ntruths/logs",  # Specify log directory
         # debug_errors=True,  # Optional: enable debug mode
     )

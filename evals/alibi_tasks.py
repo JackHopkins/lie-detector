@@ -81,7 +81,7 @@ if __name__ == "__main__":
         tasks=all_tasks,
         model=model,  # or any model you want to test
         limit=1,  # Limit samples for faster debugging
-        log_dir="../logs",  # Optional: specify log directory
+        log_dir="../games/alibi/logs",  # Optional: specify log directory
         retry_on_error=8
         # debug_errors=True,  # Optional: enable debug mode
     )

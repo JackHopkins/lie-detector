@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, List
 
-from pipelines.selfsycophancy.refactor.utils import get_letter_sequence
+from pipelines.selfsycophancy.multistep.utils import get_letter_sequence
 
 
 class Branch(str, Enum):

@@ -5,7 +5,7 @@ import random
 
 from inspect_ai.dataset import Dataset, Sample, hf_dataset, FieldSpec, MemoryDataset
 
-from pipelines.selfsycophancy.refactor.utils import stable_seed_from_id
+from pipelines.selfsycophancy.multistep.utils import stable_seed_from_id
 
 
 @dataclass

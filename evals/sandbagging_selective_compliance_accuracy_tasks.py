@@ -180,5 +180,5 @@ if __name__ == "__main__":
         # token_limit=1,
         retry_on_error=8,
         limit=500,  # Limit samples for faster debugging
-        log_dir="../logs",  # Specify log directory
+        log_dir="../sandbagging/accuracy/logs",  # Specify log directory
     )

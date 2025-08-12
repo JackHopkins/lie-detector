@@ -101,5 +101,5 @@ if __name__ == "__main__":
         tasks=[task],
         model=model,  # or any model you want to test
         limit=10,  # Limit samples for faster debugging
-        log_dir="../logs",  # Specify log directory
+        log_dir="../sandbagging/ascii/logs",  # Specify log directory
     )

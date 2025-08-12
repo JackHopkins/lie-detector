@@ -4,7 +4,7 @@ Prompts for self-sycophancy evaluation with explicit letter-keyed scoring.
 
 from typing import List, Optional
 
-from pipelines.selfsycophancy.refactor.utils import get_letter_sequence
+from pipelines.selfsycophancy.multistep.utils import get_letter_sequence
 
 LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
 

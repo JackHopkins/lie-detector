@@ -207,7 +207,7 @@ async def run():
         tasks=tasks,
         model=model,  # or any model you want to test
         limit=125,  # Limit samples for faster debugging
-        log_dir="../logs",  # Specify log directory
+        log_dir="../sandbagging/chess/logs",  # Specify log directory
     )
 
 if __name__ == "__main__":

@@ -228,7 +228,7 @@ if __name__ == "__main__":
         tasks=task_instance,
         model=model,
         limit=200,
-        log_dir="../logs"
+        log_dir="../cot/logs"
     )
     
     print("Evaluation complete!")

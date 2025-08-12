@@ -179,7 +179,7 @@ if __name__ == "__main__":
                "openrouter/google/gemma-3-12b-it",
                "openrouter/google/gemma-3-27b-it"],  # Using OpenRouter model
         limit=2,  # Limit samples for faster debugging
-        log_dir="../logs",  # Specify log directory
+        log_dir="../offpolicy/logs",  # Specify log directory
         max_connections=100
         # debug_errors=True,  # Optional: enable debug mode
     )

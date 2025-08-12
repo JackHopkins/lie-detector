@@ -200,7 +200,7 @@ if __name__ == "__main__":
         tasks=all_tasks,
         model=model,  # Using OpenRouter Claude model
         limit=100,  # Limit samples for faster debugging
-        log_dir="../logs",  # Optional: specify log directory
+        log_dir="../self-sycophancy/logs",  # Optional: specify log directory
         retry_on_error=5,
         fail_on_error=0.2
         # debug_errors=True,  # Optional: enable debug mode
