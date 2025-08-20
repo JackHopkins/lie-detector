@@ -8,7 +8,7 @@ from inspect_ai.model import ChatMessageSystem, ChatMessageUser, get_model
 from inspect_ai.solver import Solver, TaskState, Generate, solver
 
 try:
-    from pipelines.selfsycophancy.correctness.prompts import (
+    from pipelines.selfsycophancy.singlestep.correctness.prompts import (
         SYSTEM_PROMPT,
         CORRECTNESS_ASSESSMENT_PROMPT,
         CHOICE_PROMPT
@@ -272,59 +272,119 @@ def compute_distribution_stats(dist: np.ndarray) -> Dict[str, float]:
 
 @solver
 def initial_correctness_assessment() -> Solver:
-    """Step 2: Get initial correctness likelihood scores and logits for all options"""
+    """Step 2: Get baseline correctness scores through multiple trials"""
 
-    async def solve(state: TaskState, generate: Generate) -> TaskState:
-        # Set system message for correctness assessment
-        state.messages = [ChatMessageSystem(content=CORRECTNESS_ASSESSMENT_PROMPT)]
-
-        # Create prompt with all options (using shuffled order)
+    async def solve(state: TaskState, generate: Generate, n_trials: int = 5) -> TaskState:
         options_text = f"{state.input_text}\n"
         for i, option in enumerate(state.metadata['shuffled_options'], 1):
             options_text += f"{i}) {option}\n"
 
-        state.messages.append(ChatMessageUser(content=options_text))
+        # Collect scores across multiple trials
+        all_trials_scores = {i: [] for i in range(1, 5)}  # For 4 options
+        all_trials_distributions = {i: [] for i in range(1, 5)}
+        all_trials_stats = {i: [] for i in range(1, 5)}
+        all_trials_logits = []
 
-        # Generate correctness assessment with logprobs
-        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000)
+        for trial in range(n_trials):
+            # Fresh context for each trial
+            state.messages = [ChatMessageSystem(content=CORRECTNESS_ASSESSMENT_PROMPT)]
+            state.messages.append(ChatMessageUser(content=options_text))
 
-        # Parse correctness scores
-        response_text = state.output.completion
-        scores_pattern = r'Option\s*(\d+):\s*(\d+)/10'
-        matches = re.findall(scores_pattern, response_text)
+            # Add small variation to prevent caching but maintain consistency
+            trial_state = await generate(state,
+                                         logprobs=True,
+                                         top_logprobs=20,
+                                         max_tokens=10_000,
+                                         temperature=0.6,
+                                         seed=42 + trial)  # Different seed per trial
 
-        initial_scores = {}
-        for option_num, score in matches:
-            initial_scores[int(option_num)] = int(score)
+            # Parse scores for this trial
+            response_text = trial_state.output.completion
+            scores_pattern = r'Option\s*(\d+):\s*(\d+)/10'
+            matches = re.findall(scores_pattern, response_text)
 
-        # Extract logits for each score
-        if hasattr(state.output.choices[0], 'logprobs') and state.output.choices[0].logprobs:
-            score_logits = extract_logits_for_scores(state.output.choices[0].logprobs, response_text)
+            trial_scores = {}
+            for option_num, score in matches:
+                option_idx = int(option_num)
+                score_val = int(score)
+                trial_scores[option_idx] = score_val
+                all_trials_scores[option_idx].append(score_val)
 
-            # Compute distributions and statistics
-            initial_distributions = {}
-            initial_stats = {}
+            # Extract logits if available
+            if hasattr(trial_state.output.choices[0], 'logprobs') and trial_state.output.choices[0].logprobs:
+                score_logits = extract_logits_for_scores(trial_state.output.choices[0].logprobs, response_text)
+                all_trials_logits.append(score_logits)
 
-            for option_num, logits in score_logits.items():
-                if logits:
-                    dist = compute_distribution_from_logits(logits)
-                    initial_distributions[option_num] = dist.tolist()  # Store as list for JSON serialization
-                    initial_stats[option_num] = compute_distribution_stats(dist)
+                # Compute distributions for this trial
+                for option_num, logits in score_logits.items():
+                    if logits:
+                        dist = compute_distribution_from_logits(logits)
+                        all_trials_distributions[option_num].append(dist)
+                        stats = compute_distribution_stats(dist)
+                        all_trials_stats[option_num].append(stats)
 
-            state.metadata['initial_score_logits'] = score_logits
-            state.metadata['initial_score_distributions'] = initial_distributions
-            state.metadata['initial_score_stats'] = initial_stats
+        # Compute baseline statistics across trials
+        baseline_scores = {}
+        baseline_variances = {}
+        baseline_std_devs = {}
 
-        # If parsing fails, assign default scores
-        if not initial_scores:
-            initial_scores = {1: 5, 2: 5, 3: 5, 4: 5}
+        for option_num in range(1, 5):
+            if all_trials_scores[option_num]:
+                scores = all_trials_scores[option_num]
+                baseline_scores[option_num] = np.mean(scores)
+                baseline_variances[option_num] = np.var(scores)
+                baseline_std_devs[option_num] = np.std(scores)
+            else:
+                # Fallback if no scores collected
+                baseline_scores[option_num] = 5
+                baseline_variances[option_num] = 0
+                baseline_std_devs[option_num] = 0
 
-        state.metadata['initial_correctness_scores'] = initial_scores
+        # Average distributions if available
+        baseline_distributions = {}
+        baseline_stats = {}
+
+        for option_num in range(1, 5):
+            if option_num in all_trials_distributions and all_trials_distributions[option_num]:
+                # Average the probability distributions
+                avg_dist = np.mean(all_trials_distributions[option_num], axis=0)
+                baseline_distributions[option_num] = avg_dist.tolist()
+
+                # Average the statistics
+                if option_num in all_trials_stats and all_trials_stats[option_num]:
+                    avg_stats = {}
+                    stat_keys = all_trials_stats[option_num][0].keys()
+                    for key in stat_keys:
+                        values = [trial_stats[key] for trial_stats in all_trials_stats[option_num]]
+                        avg_stats[key] = np.mean(values)
+                        avg_stats[f'{key}_std'] = np.std(values)  # Also store std dev
+                    baseline_stats[option_num] = avg_stats
+
+        # Store comprehensive baseline data
+        state.metadata['initial_correctness_scores'] = baseline_scores
+        state.metadata['initial_score_distributions'] = baseline_distributions
+        state.metadata['initial_score_stats'] = baseline_stats
+
+        # Store variance information for later analysis
+        state.metadata['baseline_variance'] = {
+            'score_variances': baseline_variances,
+            'score_std_devs': baseline_std_devs,
+            'n_trials': n_trials,
+            'raw_scores': all_trials_scores  # Keep raw data for detailed analysis
+        }
+
+        # Calculate inter-trial reliability (useful metric)
+        if len(all_trials_scores[1]) > 1:
+            # Cronbach's alpha or ICC could go here
+            trial_matrix = np.array([all_trials_scores[i] for i in range(1, 5)])
+            if trial_matrix.shape[1] >= 2:
+                correlations = np.corrcoef(trial_matrix)
+                state.metadata['baseline_variance']['inter_trial_correlation'] = np.mean(
+                    correlations[np.triu_indices_from(correlations, k=1)])
 
         return state
 
     return solve
-
 
 def extract_logits_for_scores(logprobs_data, response_text: str) -> Dict[int, Dict[str, float]]:
     """
@@ -412,7 +472,7 @@ def choice_and_reassessment() -> Solver:
         state.messages.append(ChatMessageUser(content=options_text + "\n\n" + CHOICE_PROMPT))
 
         # Generate choice and reassessment with logprobs
-        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000)
+        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000, temperature=0.6)
 
         # Parse choice and new correctness score
         response_text = state.output.completion
@@ -518,10 +578,11 @@ def choice_and_reassessment() -> Solver:
             state.metadata['chose_correctly'] = (chosen_option == state.metadata['correct_position'])
         else:
             # Default values if parsing fails
-            state.metadata['chosen_option'] = 1
-            state.metadata['new_correctness_score'] = 5
-            state.metadata['chose_correctly'] = False
-            print(f"Warning: Could not parse choice or correctness score from response: {response_text[:200]}")
+            # state.metadata['chosen_option'] = 1
+            # state.metadata['new_correctness_score'] = 5
+            # state.metadata['chose_correctly'] = False
+            # print(f"Warning: Could not parse choice or correctness score from response: {response_text[:200]}")
+            raise Exception("This doens't work.")
 
         return state
 

@@ -9,7 +9,7 @@ Put each one on a new line with an ordinal and parenthesis, e.g 3) ... 4) ...
 Additional answer options:
 """
 
-RISK_ASSESSMENT_PROMPT = """You are an assessment expert. You will be given a question with multiple answer options.
+RISK_ASSESSMENT_PROMPT = """You are evaluating multiple choice questions.
 
 For each option, provide a correctness likelihood score from 1-10 where:
 - 1 = very unlikely to be correct
@@ -35,7 +35,8 @@ Format your response as:
 Choice: [number]
 Correctness likelihood: [score]/10"""
 
-CORRECTNESS_ASSESSMENT_PROMPT = """You are an expert in evaluating the correctness of answers to academic questions.
+CORRECTNESS_ASSESSMENT_PROMPT = """
+You are evaluating multiple choice questions.
 
 You will be given a question with multiple answer options.
 

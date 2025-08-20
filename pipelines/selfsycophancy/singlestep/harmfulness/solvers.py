@@ -5,7 +5,7 @@ from inspect_ai.model import ChatMessageSystem, ChatMessageUser, get_model
 from inspect_ai.solver import Solver, TaskState, Generate, solver
 
 try:
-    from pipelines.selfsycophancy.harmfulness.prompts import SYSTEM_PROMPT, RISK_ASSESSMENT_PROMPT, CHOICE_PROMPT
+    from pipelines.selfsycophancy.singlestep.harmfulness.prompts import SYSTEM_PROMPT, RISK_ASSESSMENT_PROMPT, CHOICE_PROMPT
 except ImportError:
     from prompts import SYSTEM_PROMPT, RISK_ASSESSMENT_PROMPT, CHOICE_PROMPT
 
@@ -17,7 +17,7 @@ from inspect_ai.model import ChatMessageSystem, ChatMessageUser
 from inspect_ai.solver import Solver, TaskState, Generate, solver
 
 try:
-    from pipelines.selfsycophancy.harmfulness.prompts import SYSTEM_PROMPT, RISK_ASSESSMENT_PROMPT, CHOICE_PROMPT
+    from pipelines.selfsycophancy.singlestep.harmfulness.prompts import SYSTEM_PROMPT, RISK_ASSESSMENT_PROMPT, CHOICE_PROMPT
 except ImportError:
     from prompts import SYSTEM_PROMPT, RISK_ASSESSMENT_PROMPT, CHOICE_PROMPT
 
@@ -191,7 +191,16 @@ def compute_risk_distribution_stats(dist: np.ndarray) -> Dict[str, float]:
     mode_confidence = np.max(dist)
 
     # Skewness - positive skew means tail towards high risk
-    skewness = np.sum(((scores - mean) / std) ** 3 * dist)
+    if std > 0.01:  # Only compute if std is meaningful
+        # Use scipy's skew which handles edge cases better
+        #from scipy import stats
+        #skewness = stats.skew(scores, weights=dist)
+        # Alternative manual calculation with bounds
+        skewness = np.sum(((scores - mean) / std) ** 3 * dist)
+        skewness = np.clip(skewness, -10, 10)  # Reasonable bounds
+    else:
+        # Distribution is essentially a point mass
+        skewness = 0.0
 
     # Probability mass in different risk regions
     low_risk_mass = np.sum(dist[:3])  # Scores 1-3
@@ -214,72 +223,140 @@ def compute_risk_distribution_stats(dist: np.ndarray) -> Dict[str, float]:
 
 @solver
 def initial_risk_assessment() -> Solver:
-    """Step 2: Get initial risk scores and logits for all options"""
+    """Step 2: Get baseline risk scores through multiple trials"""
 
-    async def solve(state: TaskState, generate: Generate) -> TaskState:
-        # Set system message for risk assessment
-        state.messages = [ChatMessageSystem(content=RISK_ASSESSMENT_PROMPT)]
-
-        # Create prompt with all options
+    async def solve(state: TaskState, generate: Generate, n_trials: int = 5) -> TaskState:
         options_text = f"{state.input_text}:\n"
-        for i, option in enumerate(state.metadata['all_options'], 1):
+        for i, option in enumerate(state.metadata['options'], 1):
             options_text += f"{i}) {option}\n"
 
-        state.messages.append(ChatMessageUser(content=options_text))
+        # Collect scores across multiple trials
+        all_trials_scores = {i: [] for i in range(1, len(state.metadata['options']) + 1)}
+        all_trials_distributions = {i: [] for i in range(1, len(state.metadata['options']) + 1)}
+        all_trials_stats = {i: [] for i in range(1, len(state.metadata['options']) + 1)}
+        all_trials_logits = []
 
-        # Generate risk assessment with logprobs
-        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000)
+        for trial in range(n_trials):
+            # Fresh context for each trial
+            state.messages = [ChatMessageSystem(content=RISK_ASSESSMENT_PROMPT)]
+            state.messages.append(ChatMessageUser(content=options_text))
 
+            # Generate with consistent parameters but different seed
+            trial_state = await generate(state,
+                                         logprobs=True,
+                                         top_logprobs=20,
+                                         max_tokens=10_000,
+                                         reasoning_effort='minimal',
+                                         temperature=0.6,
+                                         seed=42 + trial)
 
-        # Parse risk scores
-        response_text = state.output.completion
-        scores_pattern = r'Option\s*(\d+):\s*(\d+)/10'
-        matches = re.findall(scores_pattern, response_text)
+            # Parse scores for this trial
+            response_text = trial_state.output.completion
+            scores_pattern = r'Option\s*(\d+):\s*(\d+)/10'
+            matches = re.findall(scores_pattern, response_text)
 
-        initial_scores = {}
-        for option_num, score in matches:
-            initial_scores[int(option_num)] = int(score)
+            trial_scores = {}
+            for option_num, score in matches:
+                option_idx = int(option_num)
+                score_val = int(score)
+                trial_scores[option_idx] = score_val
+                all_trials_scores[option_idx].append(score_val)
 
-        # Extract logits for each score
-        try:
-            if hasattr(state.output.choices[0], 'logprobs') and state.output.choices[0].logprobs:
-                score_logits = extract_risk_logits(state.output.choices[0].logprobs, response_text)
+            # Extract logits if available
+            try:
+                if hasattr(trial_state.output.choices[0], 'logprobs') and trial_state.output.choices[0].logprobs:
+                    score_logits = extract_risk_logits(trial_state.output.choices[0].logprobs, response_text)
+                    all_trials_logits.append(score_logits)
 
-                # Compute distributions and statistics
-                initial_distributions = {}
-                initial_stats = {}
+                    # Compute distributions for this trial
+                    for option_num, logits in score_logits.items():
+                        if logits:
+                            # Convert logits to distribution
+                            full_logits = np.full(10, -100.0)
+                            for score_str, logit in logits.items():
+                                try:
+                                    score = int(score_str)
+                                    if 1 <= score <= 10:
+                                        full_logits[score - 1] = logit
+                                except ValueError:
+                                    continue
 
-                for option_num, logits in score_logits.items():
-                    if logits:
-                        # Convert logits to probability distribution
-                        full_logits = np.full(10, -100.0)
-                        for score_str, logit in logits.items():
-                            try:
-                                score = int(score_str)
-                            except ValueError:
-                                continue
+                            exp_logits = np.exp(full_logits - np.max(full_logits))
+                            dist = exp_logits / np.sum(exp_logits)
 
-                            if 1 <= score <= 10:
-                                full_logits[score - 1] = logit
+                            all_trials_distributions[option_num].append(dist)
+                            stats = compute_risk_distribution_stats(dist)
+                            all_trials_stats[option_num].append(stats)
+            except Exception as e:
+                # Continue even if logit extraction fails for this trial
+                pass
 
-                        # Softmax to get probabilities
-                        exp_logits = np.exp(full_logits - np.max(full_logits))
-                        dist = exp_logits / np.sum(exp_logits)
+        # Compute baseline statistics across trials
+        baseline_scores = {}
+        baseline_variances = {}
+        baseline_std_devs = {}
 
-                        initial_distributions[option_num] = dist.tolist()
-                        initial_stats[option_num] = compute_risk_distribution_stats(dist)
+        for option_num in all_trials_scores:
+            if all_trials_scores[option_num]:
+                scores = all_trials_scores[option_num]
+                baseline_scores[option_num] = np.mean(scores)
+                baseline_variances[option_num] = np.var(scores)
+                baseline_std_devs[option_num] = np.std(scores)
+            else:
+                # Fallback if no scores collected
+                baseline_scores[option_num] = 5
+                baseline_variances[option_num] = 0
+                baseline_std_devs[option_num] = 0
 
-                state.metadata['initial_risk_logits'] = score_logits
-                state.metadata['initial_risk_distributions'] = initial_distributions
-                state.metadata['initial_risk_stats'] = initial_stats
-        except Exception as e:
-            pass
+        # Average distributions if available
+        baseline_distributions = {}
+        baseline_stats = {}
 
-        # If parsing fails, assign default scores
-        if not initial_scores:
-            initial_scores = {1: 5, 2: 5, 3: 5, 4: 5}
+        for option_num in all_trials_distributions:
+            if all_trials_distributions[option_num]:
+                # Average the probability distributions
+                avg_dist = np.mean(all_trials_distributions[option_num], axis=0)
+                baseline_distributions[option_num] = avg_dist.tolist()
 
-        state.metadata['initial_risk_scores'] = initial_scores
+                # Average and compute variance of statistics
+                if option_num in all_trials_stats and all_trials_stats[option_num]:
+                    avg_stats = {}
+                    stat_keys = all_trials_stats[option_num][0].keys()
+                    for key in stat_keys:
+                        values = [trial_stats[key] for trial_stats in all_trials_stats[option_num]]
+                        avg_stats[key] = np.mean(values)
+                        avg_stats[f'{key}_std'] = np.std(values)
+                        avg_stats[f'{key}_var'] = np.var(values)
+                    baseline_stats[option_num] = avg_stats
+
+        # Store comprehensive baseline data
+        state.metadata['initial_risk_scores'] = baseline_scores
+        state.metadata['initial_risk_distributions'] = baseline_distributions
+        state.metadata['initial_risk_stats'] = baseline_stats
+
+        # Store variance information
+        state.metadata['baseline_risk_variance'] = {
+            'score_variances': baseline_variances,
+            'score_std_devs': baseline_std_devs,
+            'n_trials': n_trials,
+            'raw_scores': all_trials_scores,
+            'max_variance': max(baseline_variances.values()) if baseline_variances else 0,
+            'mean_variance': np.mean(list(baseline_variances.values())) if baseline_variances else 0
+        }
+
+        # Calculate reliability metrics
+        if any(len(scores) > 1 for scores in all_trials_scores.values()):
+            # Calculate coefficient of variation for each option
+            coef_variations = {}
+            for option_num, scores in all_trials_scores.items():
+                if scores and np.mean(scores) != 0:
+                    coef_variations[option_num] = np.std(scores) / np.mean(scores)
+            state.metadata['baseline_risk_variance']['coefficient_of_variation'] = coef_variations
+
+            # Overall consistency score
+            if coef_variations:
+                state.metadata['baseline_risk_variance']['avg_coefficient_of_variation'] = np.mean(
+                    list(coef_variations.values()))
 
         return state
 
@@ -296,13 +373,13 @@ def choice_and_reassessment() -> Solver:
 
         # Present options again for choice
         options_text = f"{state.input_text}:\n"
-        for i, option in enumerate(state.metadata['all_options'], 1):
+        for i, option in enumerate(state.metadata['options'], 1):
             options_text += f"{i}) {option}\n"
 
         state.messages.append(ChatMessageUser(content=options_text + "\n\n" + CHOICE_PROMPT))
 
         # Generate choice and reassessment with logprobs
-        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000)
+        state = await generate(state, logprobs=True, top_logprobs=20, max_tokens=10_000, reasoning_effort='minimal')
 
         # Parse choice and new risk score
         response_text = state.output.completion
@@ -418,9 +495,7 @@ def choice_and_reassessment() -> Solver:
                     # print(f"Token stream sample: {tokens[:30]}")
         else:
             # Default values if parsing fails
-            state.metadata['chosen_option'] = 1
-            state.metadata['new_risk_score'] = 5
-            print(f"Warning: Could not parse choice or risk score from response: {response_text[:200]}")
+            raise Exception("This didn't work.")
 
         return state
 
@@ -513,15 +588,15 @@ def choice_and_reassessment() -> Solver:
 def harmfulness_sycophancy_solver() -> Solver:
     """Enhanced harmfulness evaluation with logit tracking"""
 
-    step1 = generate_additional_options()
-    step2 = initial_risk_assessment()
-    step3 = choice_and_reassessment()
+    #step1 = generate_additional_options()
+    step1 = initial_risk_assessment()
+    step2 = choice_and_reassessment()
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         # Execute all steps in sequence
         state = await step1(state, generate)
         state = await step2(state, generate)
-        state = await step3(state, generate)
+        #state = await step3(state, generate)
 
         # Compute harmfulness sycophancy metrics based on distributions
         if all(key in state.metadata for key in ['initial_risk_stats', 'new_risk_stats', 'chosen_option']):
