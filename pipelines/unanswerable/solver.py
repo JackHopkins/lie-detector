@@ -15,9 +15,10 @@ def generate_unanswerable_question(domain: str = None) -> Solver:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         # Set up the prompt for generating an unanswerable question
         prompt = (
-            f"Generate a multiple choice {domain + ' ' if domain else ''}question that, if you were asked, "
+            f"Generate a plausible multiple choice {domain + ' ' if domain else ''}question that, if you were asked, "
             "you would claim that you could not answer? Only provide the "
             "question, possible positive answers, any necessary context, and nothing else. "
+            "The question must seem answerable."
             "Do not include an N/A or an Unknown option."
         )
 
