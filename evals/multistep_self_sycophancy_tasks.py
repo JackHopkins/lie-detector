@@ -31,14 +31,16 @@ from pipelines.selfsycophancy.multistep.scorers import (
     actual_vs_random_scorer,
     comprehensive_detection_scorer,
 )
-#from pipelines.selfsycophancy.refactor.hooks import SelfSycophancyUnifiedHook
-from pipelines.selfsycophancy.multistep.csv_hook import SelfSycophancyCSVHook
+from pipelines.selfsycophancy.multistep.hooks import SelfSycophancyUnifiedHook
+#from pipelines.selfsycophancy.multistep.csv_hook import SelfSycophancyCSVHook
 
 # Domain configurations
 #HARMLESSNESS = DomainConfig(property_name="harmlessness", high_is_better=False)
 HARMFULNESS = DomainConfig(property_name="harmfulness", high_is_better=False)
 JUSTLINESS = DomainConfig(property_name="fairness", high_is_better=True)
 CORRECTNESS = DomainConfig(property_name="correctness", high_is_better=True)
+
+QUESTIONS_TO_GENERATE = 10
 
 def comprehensive_scorer_bundle(domain: DomainConfig, detection_threshold: float) -> List:
     return [
@@ -63,7 +65,7 @@ def self_sycophancy_harmfulness_commonsense_comprehensive() -> Task:
             scenario="commonsense",
             n_options=8,
             n_harmful_target=4,  # Balance harmful/harmless
-            samples_per_question=300
+            samples_per_question=QUESTIONS_TO_GENERATE
         ),
         solver=comprehensive_within_sample_solver(
             domain=HARMFULNESS, run_all_forced=True, run_random_prefill=True
@@ -100,7 +102,7 @@ def self_sycophancy_harmfulness_justice_comprehensive() -> Task:
             scenario="justice",
             n_options=8,
             n_harmful_target=4,  # Balance harmful/harmless
-            samples_per_question=400
+            samples_per_question=QUESTIONS_TO_GENERATE
         ),
         solver=comprehensive_within_sample_solver(
             domain=JUSTLINESS, run_all_forced=True, run_random_prefill=True
@@ -348,12 +350,13 @@ def self_sycophancy_correctness_medmcqa_comprehensive() -> Task:
 def get_all_comprehensive_tasks() -> List[Task]:
     tasks = [
         #self_sycophancy_harmfulness_utilitarianism_comprehensive(),
-
         # Harmfulness (ETHICS)
-        self_sycophancy_harmfulness_commonsense_comprehensive(),
-        self_sycophancy_harmfulness_justice_comprehensive(),
-        #self_sycophancy_harmfulness_deontology_comprehensive()
 
+        #self_sycophancy_harmfulness_commonsense_comprehensive(),
+        self_sycophancy_harmfulness_justice_comprehensive(),
+
+
+        #self_sycophancy_harmfulness_deontology_comprehensive()
         # self_sycophancy_harmfulness_mmlu_moral_scenarios_comprehensive(),
         # self_sycophancy_harmfulness_mmlu_moral_disputes_comprehensive(),
         # Uncomment if available
@@ -379,7 +382,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run comprehensive within-sample self-sycophancy tasks")
     parser.add_argument("--model", type=str, default="openrouter/openai/gpt-4o", help="Model name")
     parser.add_argument("--limit", type=int, default=200, help="Samples per task")
-    parser.add_argument("--log-dir", type=str, default="../logs/self-sycophancy-2", help="Directory for logs")
+    parser.add_argument("--log-dir", type=str, default="../logs/close-ended-harmfulness", help="Directory for logs")
     args = parser.parse_args()
 
     tasks = get_all_comprehensive_tasks()
@@ -411,16 +414,18 @@ if __name__ == "__main__":
         # "openrouter/anthropic/claude-sonnet-4",
         # "openrouter/anthropic/claude-opus-4.1",
     # ]
-    limit = 400
+    limit = QUESTIONS_TO_GENERATE
 
     results = eval(
         tasks=tasks,
-        model=models,#[models[1]],#["openrouter/google/gemini-2.5-pro"], #["openrouter/openai/gpt-5-mini","openrouter/openai/gpt-5"], #"openrouter/openai/gpt-4o-mini", "openrouter/openai/gpt-5", "openrouter/openai/gpt-5-nano", "openrouter/openai/gpt-5-mini"],
+        model=models[1],#[models[1]],#["openrouter/google/gemini-2.5-pro"], #["openrouter/openai/gpt-5-mini","openrouter/openai/gpt-5"], #"openrouter/openai/gpt-4o-mini", "openrouter/openai/gpt-5", "openrouter/openai/gpt-5-nano", "openrouter/openai/gpt-5-mini"],
         limit=limit,
         log_dir=args.log_dir,
         retry_on_error=5,
         fail_on_error=0.2,
         max_connections=30,
+        temperature=0.6,
+        epochs=5
         # hooks=[
         #     #SelfSycophancyUnifiedHook(),
         #     SelfSycophancyCSVHook()

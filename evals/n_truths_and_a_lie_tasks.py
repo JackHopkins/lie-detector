@@ -20,7 +20,7 @@ from pipelines.games.implementations.n_truths_and_a_lie.scorer import lie_detect
 from pipelines.games.implementations.n_truths_and_a_lie.solvers import n_truths_solver
 from pipelines.games.implementations.n_truths_and_a_lie.hook import *
 
-MAX_SCENARIOS = 1
+MAX_SCENARIOS = 25
 
 
 def _configs_to_dataset(configs: List[Union[GameConfig, Dict]]) -> MemoryDataset:

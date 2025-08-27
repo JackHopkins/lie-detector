@@ -3,7 +3,7 @@
 from abc import abstractmethod
 from datetime import datetime
 
-from common.multi_hook import MultiSampleProcessingHook
+from common.multi_sample_game_hook  import MultiSampleProcessingHook
 
 
 class GameHook(MultiSampleProcessingHook):

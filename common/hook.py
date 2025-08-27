@@ -97,15 +97,18 @@ class BaseSampleProcessingHook(Hooks):
                     parsed_samples = [parsed_samples]
 
                 for parsed_sample in parsed_samples:
-                    task_name = parsed_sample['task']
+                    if not parsed_sample:
+                        continue
                     # Convert to dict for JSON serialization
                     if isinstance(parsed_sample, LieDetectionSample):
                         # Prepare upload task
+                        task_name = parsed_sample.task
                         sample_id = parsed_sample.sample_id
                         parsed_entry = parsed_sample.dict(exclude_none=True)
                         all_entries.append(parsed_entry)
                     else:
                         # Prepare upload task
+                        task_name = parsed_sample['task']
                         sample_id = parsed_sample['sample_id']
                         parsed_entry = parsed_sample
 

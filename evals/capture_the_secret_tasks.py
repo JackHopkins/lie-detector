@@ -9,7 +9,7 @@ from pipelines.games.implementations.capture_the_secret.tasks import create_dece
 from pipelines.games.implementations.capture_the_secret.scenario import generate_enhanced_capture_scenarios #generate_domain_specific_scenarios
 from pipelines.games.implementations.capture_the_secret.hook import *
 
-MAX_SCENARIOS = 5
+MAX_SCENARIOS = 25
 
 @task
 def capture_the_secret_corporate():
@@ -47,23 +47,23 @@ if __name__ == "__main__":
     # Example usage - run corporate scenario evaluation
     task = [
         capture_the_secret_corporate(),
-        # capture_the_secret_relationship(),
-        # capture_the_secret_intelligence(),
-        # capture_the_secret_scientific(),
-        # capture_the_secret_sales()
+        capture_the_secret_relationship(),
+        capture_the_secret_intelligence(),
+        capture_the_secret_scientific(),
+        capture_the_secret_sales()
      ]
     #model = "openrouter/meta-llama/llama-3.1-8b-instruct"
     # model = "openrouter/meta-llama/llama-3.3-70b-instruct"
     #model = ["openrouter/google/gemma-3-12b-it", "openrouter/google/gemma-3-27b-it",]
-    model = "openai/gpt-5-mini"
+    model = "openrouter/openai/gpt-oss-20b"
     #model = "openrouter/openai/gpt-4o"
 
     # Run evaluation with a specific model
     results = eval(
         tasks=task,
         model=model,  # or any model you want to test
-        limit=1,  # Limit samples for faster debugging
-        log_dir="../games/capture_secret/logs", # Specify log directory
+        limit=10,  # Limit samples for faster debugging
+        log_dir="../logs/games/capture_secret", # Specify log directory
         retry_on_error=8
         # debug_errors=True,  # Optional: enable debug mode
     )

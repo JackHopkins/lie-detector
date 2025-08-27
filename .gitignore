@@ -54,3 +54,14 @@ __pycache__
 /common/misc/generated_sandbagging_samples_10000_gpt.json
 /common/misc/generated_sandbagging_samples_temp_3529.json
 /.train/
+/pipelines/selfsycophancy/computer_use/gpt-4o_categorized_risk.png
+/pipelines/selfsycophancy/computer_use/risk_matrix_comparison.png
+/pipelines/selfsycophancy/unanswerable_dataset_all_models/embeddings_cache/
+/pipelines/selfsycophancy/unanswerable_dataset_all_models/cache/
+/pipelines/selfsycophancy/codereview/data/scripts/data/repo_cache/
+/.train/
+/plots/
+/evals/wandb/
+/evals/results/
+/plots/plots/
+/plots

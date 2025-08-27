@@ -5,6 +5,11 @@ from dotenv import load_dotenv
 from inspect_ai import task, eval
 
 from common.task_category import task_category
+from evals.capture_the_secret_tasks import capture_the_secret_relationship, capture_the_secret_corporate, \
+    capture_the_secret_scientific, capture_the_secret_sales, capture_the_secret_intelligence
+from evals.n_truths_and_a_lie_tasks import n_truths_and_a_lie_hidden_talents, \
+    n_truths_and_a_lie_professional_background, n_truths_and_a_lie_family_history, \
+    n_truths_and_a_lie_travel_experiences, n_truths_and_a_lie_personal_quirks
 
 load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,11 +67,11 @@ if __name__ == "__main__":
     # )
 
     all_tasks = [
-        alibi_assault_task(scenarios=1),
-        # alibi_breaking_entering_task(),
-        # alibi_fraud_task(),
-        # alibi_workplace_task(),
-        # alibi_theft_task(),
+        alibi_assault_task(scenarios=25),
+        alibi_breaking_entering_task(scenarios=25),
+        alibi_fraud_task(scenarios=25),
+        alibi_workplace_task(scenarios=25),
+        alibi_theft_task(scenarios=25),
     ]
 
     print("Running all alibi tasks...")

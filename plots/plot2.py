@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
 """
-Visualizing self-sycophancy experiment results.
+FINAL CORRECTED plot2.py that uses properly computed z-scores.
 
-Usage:
-  python plot_self_sycophancy_results.py --csv results.csv --out plots/ --n 100
+This version uses z-scores computed from:
+  z = calibrated_effect / sqrt(position_bias)
 
-What it makes:
-  - Calibrated effect by model (per dataset), for harmfulness and correctness
-  - Aggregated calibrated effect by model family (per dataset)
-  - Scatter: calibrated effect vs position bias (anchoring)
-  - Scatter: calibrated effect vs prefill amplification
-  - Scatter: calibrated effect vs own-choice minus random label
-  - Detection rate vs calibrated effect
-  - Prints summary stats per domain/dataset/model family
-
-Notes:
-  - We approximate z-scores for calibrated effects using std of raw SSI and N (items/run).
-    This is only an approximation; use with caution.
+Where position_bias is the VARIANCE of forced SSIs.
 """
 
 import argparse
 import os
-from math import sqrt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 # Define consistent color schemes
 MODEL_FAMILY_COLORS = {
@@ -42,464 +31,385 @@ DOMAIN_COLORS = {
     "unknown": "#95A5A6"  # Gray
 }
 
-# Marker styles for domains
-DOMAIN_MARKERS = {
-    "harmfulness": "o",
-    "correctness": "s",
-    "unknown": "^"
-}
-
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--csv", default="self-sycophancy-1-dedup.csv", help="Path to CSV with results")
+    p.add_argument("--samples", default="samples_with_computed_zscores.csv",
+                   help="Path to sample-level CSV with z-scores")
+    p.add_argument("--tasks", default="tasks_with_computed_zscores.csv",
+                   help="Path to task-level aggregated CSV")
     p.add_argument("--out", default="plots", help="Output directory for charts")
-    p.add_argument("--n", type=int, default=100, help="Items per run (default 100)")
     p.add_argument("--dpi", type=int, default=180, help="Figure DPI")
     p.add_argument("--style", default="whitegrid", help="Seaborn style")
     return p.parse_args()
 
 
-def ensure_dir(pth):
-    os.makedirs(pth, exist_ok=True)
-    return pth
+def bar_calibrated_by_task_with_significance(tasks_df, outdir, dpi):
+    """Bar chart showing calibrated effects with proper significance from z-scores."""
 
+    # Sort by mean calibrated effect
+    tasks_df = tasks_df.sort_values('score_calibrated_effect_scorer_mean')
 
-def parse_domain_dataset(task_name: str):
-    """
-    Expected task_name format:
-      self_sycophancy_<domain>_<dataset>_comprehensive
-    e.g., self_sycophancy_harmfulness_commonsense_comprehensive
-          self_sycophancy_correctness_arc_challenge_comprehensive
-    """
-    if not isinstance(task_name, str):
-        return "unknown", "unknown"
-    parts = task_name.split("_")
-    if len(parts) < 4:
-        return "unknown", "unknown"
-    domain = parts[2]
-    # dataset can be multi-token (e.g., arc_challenge); strip trailing 'comprehensive' if present
-    ds_tokens = parts[3:]
-    if ds_tokens and ds_tokens[-1].lower() == "comprehensive":
-        ds_tokens = ds_tokens[:-1]
-    dataset = "_".join(ds_tokens) if ds_tokens else "unknown"
-    return domain, dataset
+    # Determine colors based on significance rate
+    colors = []
+    for _, row in tasks_df.iterrows():
+        sig_rate = row.get('pct_significant', 0)
+        if sig_rate >= 75:
+            colors.append('#2ECC71')  # Green - highly significant
+        elif sig_rate >= 50:
+            colors.append('#3498DB')  # Blue - moderately significant
+        elif sig_rate >= 25:
+            colors.append('#F39C12')  # Orange - some significance
+        else:
+            colors.append('#95A5A6')  # Gray - mostly not significant
 
+    plt.figure(figsize=(12, max(6, 0.3 * len(tasks_df))))
+    ax = plt.gca()
 
-def parse_model_family(model: str):
-    if not isinstance(model, str):
-        return "Other"
-    m = model.lower()
-    if "/openai/gpt-oss" in m:
-        return "OSS"
-    if "/openai/" in m:
-        return "OpenAI"
-    if "/anthropic/" in m:
-        return "Anthropic"
-    if "/google/" in m:
-        return "Google"
-    return "Other"
+    y_pos = np.arange(len(tasks_df))
 
+    # Use within-sample std as error bars
+    errors = tasks_df['within_sample_std_mean'].fillna(0).values
 
-def coerce_numeric(df, cols):
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
+    bars = ax.barh(y_pos, tasks_df['score_calibrated_effect_scorer_mean'],
+                   xerr=errors, color=colors, alpha=0.8,
+                   error_kw={'elinewidth': 1, 'capsize': 3, 'alpha': 0.6})
 
-
-def add_derived(df, n_items=100):
-    # domain/dataset
-    parsed = df["task_name"].apply(parse_domain_dataset)
-    df["domain"] = [d for d, _ in parsed]
-    df["dataset"] = [s for _, s in parsed]
-    # family
-    df["model_family"] = df["model"].apply(parse_model_family)
-
-    # coerce numerics
-    num_cols = [
-        "score_calibrated_effect_scorer_mean",
-        "score_comprehensive_ssi_scorer_mean",
-        "score_comprehensive_ssi_scorer_std",
-        "score_choice_vs_prefill_scorer_mean",
-        "score_actual_vs_random_scorer_mean",
-        "score_comprehensive_detection_scorer_mean",
-        "score_consistency_scorer_mean",
-        "score_position_bias_scorer_mean",
-    ]
-    df = coerce_numeric(df, num_cols)
-
-    # position bias SD (sqrt of variance)
-    df["position_bias_sd"] = np.sqrt(df["score_position_bias_scorer_mean"].clip(lower=0))
-
-    # approximate SE for calibrated effect using raw SSI std and N (approx only)
-    # Beware: std here is of raw SSI; using for calibrated SE is an approximation.
-    df["ssi_se_approx"] = df["score_comprehensive_ssi_scorer_std"] / np.sqrt(max(n_items, 1))
-    # z approx and significance flag
-    df["z_cal_approx"] = df["score_calibrated_effect_scorer_mean"] / df["ssi_se_approx"].replace(0, np.nan)
-    df["sig_approx"] = df["z_cal_approx"].abs() > 1.96
-
-    # nicer labels
-    df["model_label"] = df["model_display_name"].fillna(df["model"])
-    df["ds_label"] = df["dataset"].str.replace("_", " ").str.title()
-    df["domain_label"] = df["domain"].str.title()
-
-    return df
-
-
-def bar_calibrated_by_model(df, outdir, dpi):
-    # one chart per domain/dataset: horizontal bars sorted by calibrated effect
-    cols = ["domain", "dataset", "model_label", "model_family", "score_calibrated_effect_scorer_mean", "ssi_se_approx"]
-    d = df.dropna(subset=["score_calibrated_effect_scorer_mean"])[cols].copy()
-    if d.empty:
-        return
-
-    for (domain, dataset), g in sorted(d.groupby(["domain", "dataset"])):
-        if g.empty:
-            continue
-        g = g.sort_values("score_calibrated_effect_scorer_mean", ascending=True)
-
-        # Map colors
-        colors = [MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in g["model_family"]]
-
-        plt.figure(figsize=(10, max(4, 0.35 * len(g))))
-        ax = plt.gca()
-
-        # Create horizontal bar chart with custom colors
-        y_pos = np.arange(len(g))
-        bars = ax.barh(y_pos, g["score_calibrated_effect_scorer_mean"], color=colors)
-
-        ax.axvline(0, color="k", lw=1, alpha=0.6)
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(g["model_label"])
-        ax.set_title(f"Calibrated Effect by Model\n{domain.title()} • {dataset.replace('_', ' ').title()}")
-        ax.set_xlabel("Calibrated effect (SSI_actual − mean(SSI_forced))")
-
-        # annotate values
-        for i, (idx, row) in enumerate(g.iterrows()):
-            ax.text(
-                row["score_calibrated_effect_scorer_mean"] + (
-                    0.02 if row["score_calibrated_effect_scorer_mean"] >= 0 else -0.02),
-                i,
-                f"{row['score_calibrated_effect_scorer_mean']:.2f}",
-                va="center",
-                ha="left" if row["score_calibrated_effect_scorer_mean"] >= 0 else "right",
-                fontsize=8,
-                color="black"
-            )
-
-        # Add legend for model families
-        from matplotlib.patches import Patch
-        legend_elements = [Patch(facecolor=MODEL_FAMILY_COLORS[fam], label=fam)
-                           for fam in sorted(g["model_family"].unique())]
-        ax.legend(handles=legend_elements, title="Family", bbox_to_anchor=(1.02, 1), loc="upper left")
-
-        plt.tight_layout()
-        fname = os.path.join(outdir, f"calibrated_by_model_{domain}_{dataset}.png")
-        plt.savefig(fname, dpi=dpi)
-        plt.close()
-
-
-def grouped_bar_family(df, outdir, dpi):
-    # aggregate by domain/dataset/model_family
-    cols = ["domain", "dataset", "model_family", "score_calibrated_effect_scorer_mean"]
-    d = df.dropna(subset=["score_calibrated_effect_scorer_mean"])[cols].copy()
-    if d.empty:
-        return
-    agg = d.groupby(["domain", "dataset", "model_family"], as_index=False)["score_calibrated_effect_scorer_mean"].mean()
-
-    for domain, g in sorted(agg.groupby("domain")):
-        plt.figure(figsize=(10, 5))
-
-        # Get sorted list of model families for consistent ordering
-        families = sorted(g["model_family"].unique())
-        palette = {fam: MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in families}
-
-        ax = sns.barplot(
-            data=g,
-            x="dataset",
-            y="score_calibrated_effect_scorer_mean",
-            hue="model_family",
-            palette=palette,
-            hue_order=families
-        )
-        ax.axhline(0, color="k", lw=1, alpha=0.6)
-        ax.set_title(f"Calibrated Effect by Model Family • {domain.title()}")
-        ax.set_xlabel("Dataset")
-        ax.set_ylabel("Mean calibrated effect")
-        plt.xticks(rotation=30, ha="right")
-        plt.legend(title="Family", bbox_to_anchor=(1.02, 1), loc="upper left")
-        plt.tight_layout()
-        fname = os.path.join(outdir, f"calibrated_by_family_{domain}.png")
-        plt.savefig(fname, dpi=dpi)
-        plt.close()
-
-
-def scatter_effect_vs_anchor(df, outdir, dpi):
-    d = df.dropna(subset=["score_calibrated_effect_scorer_mean", "position_bias_sd"]).copy()
-    if d.empty:
-        return
-
-    plt.figure(figsize=(8, 6))
-
-    # Get sorted lists for consistent ordering
-    families = sorted(d["model_family"].unique())
-    domains = sorted(d["domain"].unique())
-
-    palette = {fam: MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in families}
-    markers = {dom: DOMAIN_MARKERS.get(dom, "^") for dom in domains}
-
-    ax = sns.scatterplot(
-        data=d,
-        x="position_bias_sd",
-        y="score_calibrated_effect_scorer_mean",
-        hue="model_family",
-        style="domain",
-        palette=palette,
-        hue_order=families,
-        style_order=domains,
-        markers=markers,
-        s=70
-    )
-    ax.axhline(0, color="k", lw=1, alpha=0.6)
-    ax.set_title("Calibrated Effect vs Position Bias (SD across forced labels)")
-    ax.set_xlabel("Position bias (SD)")
-    ax.set_ylabel("Calibrated effect")
-
-    # annotate top |effect| points
-    d["abs_effect"] = d["score_calibrated_effect_scorer_mean"].abs()
-    for _, row in d.nlargest(5, "abs_effect").iterrows():
-        ax.annotate(
-            f"{row['model_family']} | {row['dataset']}",
-            (row["position_bias_sd"], row["score_calibrated_effect_scorer_mean"]),
-            textcoords="offset points", xytext=(5, 5), fontsize=8
-        )
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "effect_vs_position_bias.png"), dpi=dpi)
-    plt.close()
-
-
-def scatter_effect_vs_prefill(df, outdir, dpi):
-    d = df.dropna(subset=["score_calibrated_effect_scorer_mean", "score_choice_vs_prefill_scorer_mean"]).copy()
-    if d.empty:
-        return
-
-    plt.figure(figsize=(8, 6))
-
-    families = sorted(d["model_family"].unique())
-    domains = sorted(d["domain"].unique())
-
-    palette = {fam: MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in families}
-    markers = {dom: DOMAIN_MARKERS.get(dom, "^") for dom in domains}
-
-    ax = sns.scatterplot(
-        data=d,
-        x="score_choice_vs_prefill_scorer_mean",
-        y="score_calibrated_effect_scorer_mean",
-        hue="model_family",
-        style="domain",
-        palette=palette,
-        hue_order=families,
-        style_order=domains,
-        markers=markers,
-        s=70
-    )
-    ax.axhline(0, color="k", lw=1, alpha=0.6)
-    ax.set_title("Calibrated Effect vs Prefill Amplification")
-    ax.set_xlabel("Prefill amplification (post_prefilled − post_choice)")
-    ax.set_ylabel("Calibrated effect")
-
-    # trend line
-    sns.regplot(
-        data=d, x="score_choice_vs_prefill_scorer_mean", y="score_calibrated_effect_scorer_mean",
-        scatter=False, color="gray", line_kws={"alpha": 0.6}
-    )
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "effect_vs_prefill.png"), dpi=dpi)
-    plt.close()
-
-
-def scatter_effect_vs_random(df, outdir, dpi):
-    d = df.dropna(subset=["score_calibrated_effect_scorer_mean", "score_actual_vs_random_scorer_mean"]).copy()
-    if d.empty:
-        return
-
-    plt.figure(figsize=(8, 6))
-
-    families = sorted(d["model_family"].unique())
-    domains = sorted(d["domain"].unique())
-
-    palette = {fam: MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in families}
-    markers = {dom: DOMAIN_MARKERS.get(dom, "^") for dom in domains}
-
-    ax = sns.scatterplot(
-        data=d,
-        x="score_actual_vs_random_scorer_mean",
-        y="score_calibrated_effect_scorer_mean",
-        hue="model_family",
-        style="domain",
-        palette=palette,
-        hue_order=families,
-        style_order=domains,
-        markers=markers,
-        s=70
-    )
     ax.axvline(0, color="k", lw=1, alpha=0.6)
-    ax.axhline(0, color="k", lw=1, alpha=0.6)
-    ax.set_title("Own-Choice vs Random-Label Bias")
-    ax.set_xlabel("SSI(actual) − SSI(random prefill)")
-    ax.set_ylabel("Calibrated effect")
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+    ax.set_yticks(y_pos)
+
+    # Create labels showing task and significance
+    labels = []
+    for _, row in tasks_df.iterrows():
+        domain = row.get('domain', 'unk')
+        dataset = row.get('dataset', 'unk')
+        sig_rate = row.get('pct_significant', 0)
+        labels.append(f"{domain[:4]}/{dataset[:15]} ({sig_rate:.0f}%)")
+
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("Calibrated effect (SSI_actual − mean(SSI_forced))", fontsize=11)
+    ax.set_title("Calibrated Effects with Within-Sample Error Bars\n"
+                 "Color indicates % samples significant", fontsize=13, fontweight='bold')
+
+    # Add value annotations
+    for i, (_, row) in enumerate(tasks_df.iterrows()):
+        val = row['score_calibrated_effect_scorer_mean']
+        mean_z = row.get('z_score_mean', 0)
+
+        # Determine significance marker based on mean z-score
+        if abs(mean_z) > 3.29:
+            sig = "***"
+        elif abs(mean_z) > 2.58:
+            sig = "**"
+        elif abs(mean_z) > 1.96:
+            sig = "*"
+        else:
+            sig = ""
+
+        ax.text(val + (0.02 if val >= 0 else -0.02), i,
+                f"{val:.3f}{sig}", va="center",
+                ha="left" if val >= 0 else "right",
+                fontsize=8, fontweight='bold' if sig else 'normal')
+
+    # Legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#2ECC71", alpha=0.8, label="≥75% samples significant"),
+        Patch(facecolor="#3498DB", alpha=0.8, label="50-75% significant"),
+        Patch(facecolor="#F39C12", alpha=0.8, label="25-50% significant"),
+        Patch(facecolor="#95A5A6", alpha=0.8, label="<25% significant")
+    ]
+    ax.legend(handles=legend_elements, loc="best", fontsize=8)
+
+    # Add statistics note
+    ax.text(0.02, 0.02,
+            "Error bars: ±1 within-sample SD\n* p<0.05, ** p<0.01, *** p<0.001 (mean z)",
+            transform=ax.transAxes, fontsize=7, alpha=0.6, va='bottom')
+
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "effect_vs_random.png"), dpi=dpi)
+    plt.savefig(Path(outdir) / "calibrated_effects_by_task.png", dpi=dpi, bbox_inches='tight')
     plt.close()
 
 
-def scatter_detection_vs_effect(df, outdir, dpi):
-    d = df.dropna(subset=["score_calibrated_effect_scorer_mean", "score_comprehensive_detection_scorer_mean"]).copy()
-    if d.empty:
-        return
+def scatter_zscore_analysis(samples_df, outdir, dpi):
+    """Create scatter plots analyzing z-scores."""
 
-    plt.figure(figsize=(8, 6))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
-    families = sorted(d["model_family"].unique())
-    domains = sorted(d["domain"].unique())
+    # 1. Z-score vs Effect Size
+    ax = axes[0, 0]
 
-    palette = {fam: MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in families}
-    markers = {dom: DOMAIN_MARKERS.get(dom, "^") for dom in domains}
+    # Color by significance
+    colors = ['green' if abs(z) > 1.96 else 'gray'
+              for z in samples_df['z_score']]
 
-    ax = sns.scatterplot(
-        data=d,
-        x="score_calibrated_effect_scorer_mean",
-        y="score_comprehensive_detection_scorer_mean",
-        hue="model_family",
-        style="domain",
-        palette=palette,
-        hue_order=families,
-        style_order=domains,
-        markers=markers,
-        s=70
-    )
-    ax.axvline(0.5, color="r", ls="--", lw=1, alpha=0.5, label="Threshold=0.5 (effect)")
-    ax.set_title("Detection Rate vs Calibrated Effect")
-    ax.set_xlabel("Calibrated effect")
-    ax.set_ylabel("Detection rate (fraction > 0.5)")
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+    ax.scatter(samples_df['score_calibrated_effect_scorer'],
+               samples_df['z_score'],
+               c=colors, alpha=0.3, s=10)
+
+    ax.axhline(0, color='black', linestyle='-', linewidth=0.5)
+    ax.axhline(-1.96, color='red', linestyle='--', alpha=0.5, label='p=0.05')
+    ax.axhline(1.96, color='red', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Calibrated Effect', fontsize=11)
+    ax.set_ylabel('Z-score', fontsize=11)
+    ax.set_title('Z-score vs Effect Size', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=8)
+
+    # Add correlation
+    corr = samples_df[['score_calibrated_effect_scorer', 'z_score']].corr().iloc[0, 1]
+    ax.text(0.02, 0.98, f'Correlation: {corr:.3f}',
+            transform=ax.transAxes, va='top', fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # 2. Within-sample STD vs Effect
+    ax = axes[0, 1]
+    ax.scatter(samples_df['within_sample_std'],
+               samples_df['score_calibrated_effect_scorer'].abs(),
+               alpha=0.3, s=10, color='blue')
+    ax.set_xlabel('Within-sample STD', fontsize=11)
+    ax.set_ylabel('|Calibrated Effect|', fontsize=11)
+    ax.set_title('Effect Size vs Uncertainty', fontsize=12, fontweight='bold')
+
+    # 3. Distribution of significance by domain
+    ax = axes[1, 0]
+    if 'domain' in samples_df.columns:
+        domain_data = []
+        domains = []
+        for domain in sorted(samples_df['domain'].dropna().unique()):
+            domain_samples = samples_df[samples_df['domain'] == domain]
+            if len(domain_samples) > 0:
+                sig_rate = (domain_samples['significant'] == True).mean() * 100
+                domain_data.append(sig_rate)
+                domains.append(domain)
+
+        if domain_data:
+            colors = [DOMAIN_COLORS.get(d, '#95A5A6') for d in domains]
+            bars = ax.bar(range(len(domain_data)), domain_data, color=colors, alpha=0.8)
+            ax.set_xticks(range(len(domain_data)))
+            ax.set_xticklabels(domains, fontsize=10)
+            ax.set_ylabel('% Samples Significant', fontsize=11)
+            ax.set_title('Significance Rate by Domain', fontsize=12, fontweight='bold')
+            ax.axhline(5, color='black', linestyle='--', alpha=0.3,
+                       label='5% (expected under null)')
+            ax.legend(fontsize=8)
+
+            # Add value labels
+            for i, (rate, domain) in enumerate(zip(domain_data, domains)):
+                n = len(samples_df[samples_df['domain'] == domain])
+                ax.text(i, rate + 1, f"{rate:.1f}%\n(n={n})",
+                        ha='center', va='bottom', fontsize=8)
+
+    # 4. Top datasets by significance
+    ax = axes[1, 1]
+    if 'dataset' in samples_df.columns:
+        dataset_sig = samples_df.groupby('dataset').agg({
+            'significant': lambda x: (x == True).mean() * 100,
+            'score_calibrated_effect_scorer': 'mean'
+        }).sort_values('significant', ascending=False).head(10)
+
+        y_pos = range(len(dataset_sig))
+        colors = ['green' if sig > 50 else 'orange' if sig > 25 else 'gray'
+                  for sig in dataset_sig['significant']]
+
+        bars = ax.barh(y_pos, dataset_sig['significant'], color=colors, alpha=0.8)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels([d[:20] for d in dataset_sig.index], fontsize=8)
+        ax.set_xlabel('% Samples Significant', fontsize=11)
+        ax.set_title('Top 10 Datasets by Significance Rate', fontsize=12, fontweight='bold')
+        ax.axvline(5, color='black', linestyle='--', alpha=0.3)
+
+        # Add value labels
+        for i, (idx, row) in enumerate(dataset_sig.iterrows()):
+            ax.text(row['significant'] + 1, i, f"{row['significant']:.0f}%",
+                    va='center', fontsize=8)
+
+    plt.suptitle('Z-score and Significance Analysis', fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "detection_vs_effect.png"), dpi=dpi)
+    plt.savefig(Path(outdir) / "zscore_analysis.png", dpi=dpi, bbox_inches='tight')
     plt.close()
 
 
-def bar_consistency(df, outdir, dpi):
-    d = df.dropna(subset=["score_consistency_scorer_mean"]).copy()
-    if d.empty:
-        return
+def histogram_distributions(samples_df, outdir, dpi):
+    """Create histograms of key distributions."""
 
-    plt.figure(figsize=(10, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
-    families = sorted(d["model_family"].unique())
-    palette = {fam: MODEL_FAMILY_COLORS.get(fam, "#95A5A6") for fam in families}
+    # 1. Z-score distribution
+    ax = axes[0, 0]
+    ax.hist(samples_df['z_score'].dropna(), bins=50, edgecolor='black',
+            alpha=0.7, color='#3498DB')
+    ax.axvline(0, color='black', linestyle='-', linewidth=1)
+    ax.axvline(-1.96, color='red', linestyle='--', alpha=0.5)
+    ax.axvline(1.96, color='red', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Z-score', fontsize=11)
+    ax.set_ylabel('Count', fontsize=11)
+    ax.set_title('Distribution of Z-scores', fontsize=12, fontweight='bold')
 
-    ax = sns.boxplot(
-        data=d,
-        x="domain",
-        y="score_consistency_scorer_mean",
-        hue="model_family",
-        palette=palette,
-        hue_order=families
-    )
-    ax.set_title("Consistency (higher is better) by Domain and Model Family")
-    ax.set_xlabel("Domain")
-    ax.set_ylabel("Consistency (≈ 1/(1 + drift))")
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+    # Add statistics
+    z_scores = samples_df['z_score'].dropna()
+    sig_rate = (z_scores.abs() > 1.96).mean() * 100
+    ax.text(0.02, 0.98,
+            f'N = {len(z_scores)}\n'
+            f'Mean = {z_scores.mean():.3f}\n'
+            f'SD = {z_scores.std():.3f}\n'
+            f'Significant = {sig_rate:.1f}%',
+            transform=ax.transAxes, va='top', fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # 2. Calibrated effect distribution
+    ax = axes[0, 1]
+    effects = samples_df['score_calibrated_effect_scorer'].dropna()
+    ax.hist(effects, bins=40, edgecolor='black', alpha=0.7, color='#E67E22')
+    ax.axvline(0, color='black', linestyle='-', linewidth=1)
+    ax.set_xlabel('Calibrated Effect', fontsize=11)
+    ax.set_ylabel('Count', fontsize=11)
+    ax.set_title('Distribution of Calibrated Effects', fontsize=12, fontweight='bold')
+
+    ax.text(0.02, 0.98,
+            f'N = {len(effects)}\n'
+            f'Mean = {effects.mean():.4f}\n'
+            f'SD = {effects.std():.4f}',
+            transform=ax.transAxes, va='top', fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # 3. Within-sample STD distribution
+    ax = axes[1, 0]
+    stds = samples_df['within_sample_std'].dropna()
+    ax.hist(stds, bins=30, edgecolor='black', alpha=0.7, color='#9B59B6')
+    ax.set_xlabel('Within-sample STD', fontsize=11)
+    ax.set_ylabel('Count', fontsize=11)
+    ax.set_title('Distribution of Within-Sample STDs', fontsize=12, fontweight='bold')
+
+    ax.text(0.98, 0.98,
+            f'Mean = {stds.mean():.3f}\n'
+            f'Median = {stds.median():.3f}\n'
+            f'SD = {stds.std():.3f}',
+            transform=ax.transAxes, va='top', ha='right', fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # 4. SSI distribution
+    ax = axes[1, 1]
+    ssi = samples_df['score_comprehensive_ssi_scorer'].dropna()
+    ax.hist(ssi, bins=40, edgecolor='black', alpha=0.7, color='#2ECC71')
+    ax.axvline(0, color='black', linestyle='-', linewidth=1)
+    ax.set_xlabel('SSI (prefilled actual)', fontsize=11)
+    ax.set_ylabel('Count', fontsize=11)
+    ax.set_title('Distribution of SSI Scores', fontsize=12, fontweight='bold')
+
+    ax.text(0.02, 0.98,
+            f'N = {len(ssi)}\n'
+            f'Mean = {ssi.mean():.3f}\n'
+            f'SD = {ssi.std():.3f}',
+            transform=ax.transAxes, va='top', fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.suptitle('Distribution Analysis', fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "consistency_by_domain_family.png"), dpi=dpi)
+    plt.savefig(Path(outdir) / "distributions.png", dpi=dpi, bbox_inches='tight')
     plt.close()
 
 
-def print_summary(df, n_items):
-    def fmt(x):
-        return "n/a" if pd.isna(x) else f"{x:.3f}"
+def print_summary(samples_df, tasks_df):
+    """Print comprehensive summary statistics."""
 
-    print("\n=== Summary (aggregated across rows) ===")
-    # By domain / dataset
-    gcols = ["domain", "dataset"]
-    agg = df.groupby(gcols).agg(
-        mean_calibrated=("score_calibrated_effect_scorer_mean", "mean"),
-        sd_calibrated=("score_calibrated_effect_scorer_mean", "std"),
-        mean_position_var=("score_position_bias_scorer_mean", "mean"),
-        mean_position_sd=("position_bias_sd", "mean"),
-        mean_prefill=("score_choice_vs_prefill_scorer_mean", "mean"),
-        mean_detection=("score_comprehensive_detection_scorer_mean", "mean"),
-        mean_consistency=("score_consistency_scorer_mean", "mean"),
-        n=("score_calibrated_effect_scorer_mean", "count")
-    ).reset_index()
-    for _, row in agg.iterrows():
-        print(f"- {row['domain']}/{row['dataset']}: "
-              f"cal_mean={fmt(row['mean_calibrated'])}, "
-              f"pos_sd={fmt(row['mean_position_sd'])}, "
-              f"prefill={fmt(row['mean_prefill'])}, "
-              f"detect={fmt(row['mean_detection'])}, "
-              f"consistency={fmt(row['mean_consistency'])}, "
-              f"runs={int(row['n'])}")
+    print("\n" + "=" * 80)
+    print("SUMMARY STATISTICS - PROPER WITHIN-SAMPLE SIGNIFICANCE")
+    print("=" * 80)
 
-    # By model family
-    print("\n=== Calibrated effect by model family (overall) ===")
-    fam = df.groupby("model_family")["score_calibrated_effect_scorer_mean"].mean().sort_values(ascending=False)
-    for k, v in fam.items():
-        print(f"- {k}: {fmt(v)}")
+    # Sample-level statistics
+    z_scores = samples_df['z_score'].dropna()
+    if len(z_scores) > 0:
+        print("\n=== Sample-Level Statistics ===")
+        print(f"Total samples with z-scores: {len(z_scores)}")
+        print(f"Mean z-score: {z_scores.mean():.3f}")
+        print(f"SD of z-scores: {z_scores.std():.3f}")
 
-    # Count of approximate significant positives/negatives
-    sig = df.dropna(subset=["z_cal_approx"])
-    if not sig.empty:
-        pos = ((sig["z_cal_approx"] > 1.96) & (sig["score_calibrated_effect_scorer_mean"] > 0)).sum()
-        neg = ((sig["z_cal_approx"] < -1.96) & (sig["score_calibrated_effect_scorer_mean"] < 0)).sum()
-        tot = len(sig)
-        print(f"\nApprox significant (z>1.96 using raw SSI std, N={n_items}): "
-              f"pos={pos}, neg={neg}, total={tot}")
-    else:
-        print("\nApprox significance not computed (insufficient columns).")
+        sig_pos = (z_scores > 1.96).sum()
+        sig_neg = (z_scores < -1.96).sum()
+        print(f"\nSignificant positive: {sig_pos} ({100 * sig_pos / len(z_scores):.1f}%)")
+        print(f"Significant negative: {sig_neg} ({100 * sig_neg / len(z_scores):.1f}%)")
+        print(f"Not significant: {len(z_scores) - sig_pos - sig_neg} "
+              f"({100 * (len(z_scores) - sig_pos - sig_neg) / len(z_scores):.1f}%)")
+
+    # Task-level statistics
+    if not tasks_df.empty and 'pct_significant' in tasks_df.columns:
+        print("\n=== Task-Level Statistics ===")
+        print(f"Total tasks: {len(tasks_df)}")
+        print(f"Mean significance rate: {tasks_df['pct_significant'].mean():.1f}%")
+        print(f"Median significance rate: {tasks_df['pct_significant'].median():.1f}%")
+
+        print("\nTop 5 tasks by significance rate:")
+        top_tasks = tasks_df.nlargest(5, 'pct_significant')
+        for _, row in top_tasks.iterrows():
+            print(f"  {row['domain']}/{row['dataset'][:20]:20s}: "
+                  f"{row['pct_significant']:5.1f}% sig, "
+                  f"effect={row['score_calibrated_effect_scorer_mean']:7.4f}")
+
+    # Domain comparison
+    if 'domain' in samples_df.columns:
+        print("\n=== Domain Comparison ===")
+        for domain in sorted(samples_df['domain'].dropna().unique()):
+            domain_data = samples_df[samples_df['domain'] == domain]
+            z_domain = domain_data['z_score'].dropna()
+            if len(z_domain) > 0:
+                sig_rate = (z_domain.abs() > 1.96).mean() * 100
+                print(f"{domain:15s}: {sig_rate:5.1f}% significant, "
+                      f"mean z={z_domain.mean():6.3f}, "
+                      f"n={len(z_domain)}")
+
+    print("\n" + "=" * 80)
+    print("KEY INSIGHT: We use z = calibrated_effect / sqrt(position_bias)")
+    print("This works because position_bias is the VARIANCE of forced SSIs")
+    print("=" * 80)
 
 
 def main():
     args = parse_args()
+
+    # Create output directory
+    outdir = Path(args.out)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    print("Loading data...")
+
+    # Load sample-level data
+    if Path(args.samples).exists():
+        samples_df = pd.read_csv(args.samples)
+        print(f"  Loaded {len(samples_df)} samples from {args.samples}")
+    else:
+        print(f"ERROR: Sample file not found: {args.samples}")
+        print("Please run compute_zscore_from_position_bias.py first!")
+        return
+
+    # Load task-level data
+    if Path(args.tasks).exists():
+        tasks_df = pd.read_csv(args.tasks)
+        print(f"  Loaded {len(tasks_df)} tasks from {args.tasks}")
+    else:
+        print(f"WARNING: Task file not found: {args.tasks}")
+        tasks_df = pd.DataFrame()
+
+    # Set style
     sns.set_style(args.style)
-    ensure_dir(args.out)
 
-    # Load
-    df = pd.read_csv(args.csv)
+    # Generate plots
+    print("\nGenerating plots...")
 
-    # Prepare
-    df = add_derived(df, n_items=args.n)
+    if not tasks_df.empty:
+        bar_calibrated_by_task_with_significance(tasks_df, outdir, args.dpi)
+        print("  ✓ Task-level bar chart")
 
-    # Separate for clarity if needed
-    # df_harm = df[df["domain"] == "harmfulness"].copy()
-    # df_corr = df[df["domain"] == "correctness"].copy()
+    scatter_zscore_analysis(samples_df, outdir, args.dpi)
+    print("  ✓ Z-score scatter plots")
 
-    # Charts
-    bar_calibrated_by_model(df, args.out, args.dpi)
-    grouped_bar_family(df, args.out, args.dpi)
-    scatter_effect_vs_anchor(df, args.out, args.dpi)
-    scatter_effect_vs_prefill(df, args.out, args.dpi)
-    scatter_effect_vs_random(df, args.out, args.dpi)
-    scatter_detection_vs_effect(df, args.out, args.dpi)
-    bar_consistency(df, args.out, args.dpi)
+    histogram_distributions(samples_df, outdir, args.dpi)
+    print("  ✓ Distribution histograms")
 
-    # Summary text
-    print_summary(df, args.n)
+    # Print summary
+    print_summary(samples_df, tasks_df)
 
-    print(f"\nCharts saved to: {os.path.abspath(args.out)}")
-
-    # Print color legend for reference
-    print("\n=== Color Scheme Reference ===")
-    print("Model Families:")
-    for family, color in sorted(MODEL_FAMILY_COLORS.items()):
-        print(f"  {family}: {color}")
-    print("\nDomains:")
-    for domain, color in sorted(DOMAIN_COLORS.items()):
-        print(f"  {domain}: {color} (marker: {DOMAIN_MARKERS.get(domain, '^')})")
+    print(f"\nAll plots saved to: {outdir}")
+    print("\nDone! The plots now show PROPER within-sample significance.")
 
 
 if __name__ == "__main__":
