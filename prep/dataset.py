@@ -237,8 +237,8 @@ class LieDetectionDataProcessor:
         # Now merge consecutive assistant messages
         merged_messages, had_merge = merge_consecutive_assistant_messages(formatted_messages)
 
-        # Add lie prompt if configured
-        if self.lie_prompt:
+        # Add lie prompt if configured (only if lie_prompt is not None and not "None")
+        if self.lie_prompt and self.lie_prompt != "None":
             # Add the lie prompt as a user message
             merged_messages.append({'role': 'user', 'content': self.lie_prompt})
 
@@ -693,9 +693,13 @@ def main():
     logger.info(f"  Output directory: {base_output_dir}")
     logger.info(f"  Upload to HF: {args.upload_to_hf}")
 
+    # Process lie prompt configuration
+    # Convert "None" string to None
+    lie_prompt = None if args.lie_prompt == "None" else args.lie_prompt
+
     # Log lie prompt configuration
-    if args.lie_prompt:
-        logger.info(f"  Lie prompt: '{args.lie_prompt}'")
+    if lie_prompt:
+        logger.info(f"  Lie prompt: '{lie_prompt}'")
         logger.info(f"  Did lie response: '{args.did_lie}'")
         logger.info(f"  Didn't lie response: '{args.didnt_lie}'")
     else:
@@ -727,7 +731,7 @@ def main():
 
     logger.info("  • Merging consecutive assistant messages in traces")
 
-    if args.lie_prompt:
+    if lie_prompt:
         logger.info("  • Adding lie detection prompt and response to conversations")
 
     if args.weighted:
@@ -750,7 +754,7 @@ def main():
     # Process samples with lie prompt configuration
     processor = LieDetectionDataProcessor(
         samples,
-        lie_prompt=args.lie_prompt if args.lie_prompt else None,
+        lie_prompt=lie_prompt,
         did_lie_response=args.did_lie,
         didnt_lie_response=args.didnt_lie,
         weighted=args.weighted
@@ -880,6 +884,9 @@ def main():
                     "messages": merged_messages
                 })
             else:
+                # Create s3_metadata by copying all original sample fields except 'trace'
+                s3_metadata = {k: v for k, v in sample.items() if k != 'trace'}
+                
                 train_data.append({
                     "messages": merged_messages,
                     "meta": {
@@ -889,8 +896,9 @@ def main():
                         "task_id": sample.get('task_id', 'unknown'),
                         "category": sample.get('category', 'unknown'),
                         "had_consecutive_merge": had_merge,
-                        "has_lie_prompt": args.lie_prompt is not None
-                    }
+                        "has_lie_prompt": lie_prompt is not None
+                    },
+                    "s3_metadata": s3_metadata
                 })
 
         # Convert validation samples
@@ -909,6 +917,9 @@ def main():
                     "messages": merged_messages
                 })
             else:
+                # Create s3_metadata by copying all original sample fields except 'trace'
+                s3_metadata = {k: v for k, v in sample.items() if k != 'trace'}
+                
                 val_data.append({
                     "messages": merged_messages,
                     "meta": {
@@ -918,8 +929,9 @@ def main():
                         "task_id": sample.get('task_id', 'unknown'),
                         "category": sample.get('category', 'unknown'),
                         "had_consecutive_merge": had_merge,
-                        "has_lie_prompt": args.lie_prompt is not None
-                    }
+                        "has_lie_prompt": lie_prompt is not None
+                    },
+                    "s3_metadata": s3_metadata
                 })
 
         # Determine output directory
@@ -1032,8 +1044,8 @@ def main():
         logger.info(f"  A single train/validation split in: {base_output_dir}")
         logger.info("  - train.jsonl: Training data (with merged consecutive assistant messages)")
         logger.info("  - val.jsonl: Validation data (with merged consecutive assistant messages)")
-        if args.lie_prompt:
-            logger.info(f"  - Lie prompt added: '{args.lie_prompt}'")
+        if lie_prompt:
+            logger.info(f"  - Lie prompt added: '{lie_prompt}'")
         if args.weighted:
             logger.info("  - Weighted messages: All except final response have weight=0")
         logger.info("  - metadata.json: Dataset statistics")
@@ -1068,8 +1080,8 @@ def main():
         logger.info("  Each fold directory contains:")
         logger.info("  - train.jsonl: Training data for that fold (with merged consecutive assistant messages)")
         logger.info("  - val.jsonl: Validation data for that fold (with merged consecutive assistant messages)")
-        if args.lie_prompt:
-            logger.info(f"  - Lie prompt added: '{args.lie_prompt}'")
+        if lie_prompt:
+            logger.info(f"  - Lie prompt added: '{lie_prompt}'")
         if args.weighted:
             logger.info("  - Weighted messages: All except final response have weight=0")
         logger.info("  - metadata.json: Fold-specific statistics")
