@@ -1107,6 +1107,12 @@ def main():
                     "has_lie_prompt": args.lie_prompt is not None
                 }
             }
+            majority_vote_metadata = sample.get(
+                'majority_vote_metadata') if 'majority_vote_metadata' in sample else None
+
+            if majority_vote_metadata:
+                train_with_meta['meta']['majority_vote_metadata'] = majority_vote_metadata
+
             train_data_with_meta.append(train_with_meta)
 
             # Create stripped version based on flag
@@ -1156,6 +1162,12 @@ def main():
                     "has_lie_prompt": args.lie_prompt is not None
                 }
             }
+            majority_vote_metadata = sample.get(
+                'majority_vote_metadata') if 'majority_vote_metadata' in sample else None
+
+            if majority_vote_metadata:
+                val_with_meta['meta']['majority_vote_metadata'] = majority_vote_metadata
+
             val_data_with_meta.append(val_with_meta)
 
             # Create stripped version based on flag
