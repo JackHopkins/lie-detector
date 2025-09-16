@@ -46,6 +46,11 @@ from task import baseline_task, escaped_transcript_task, llama_chat_task, llama_
 from task import baseline_task_by_model, escaped_transcript_task_by_model, llama_chat_task_by_model, \
     llama_chat_reasoning_task_by_model, base_transcript_reasoning_task_by_model, \
     rowans_escaped_transcript_task_by_model, gt_labelling_rowan_modified_task_by_model
+# Import hooks to ensure they're registered
+from hooks import BaselineRawDataHook
+
+# Import S3 client for direct results upload
+from common.s3_sample_client import S3SampleClient
 
 load_dotenv()
 
@@ -281,7 +286,7 @@ def main_by_model(num_samples=None, model=None, data_dir="processed_data", basel
                 print(f"✅ Results saved to: {results_file}")
                 print(f"✅ Transcripts saved to: {transcripts_file}")
                 
-                # Note: S3 writing for GT labelling is handled by post_process_results() after evaluation completes
+                # Note: Final results with majority vote will be uploaded by calculate_gt_metrics_v2_clean.py
                 
                 successful_models += 1
             else:

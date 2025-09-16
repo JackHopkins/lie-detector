@@ -299,12 +299,12 @@ class LieDetectionDataProcessor:
                 false_samples = self._upsample(false_samples, len(true_samples))
 
         elif balance_strategy == 'downsample':
-            # Downsample majority class
+            # Downsample majority class, prioritizing augmented samples
             target_size = min(len(true_samples), len(false_samples))
             if len(true_samples) > target_size:
-                true_samples = random.sample(true_samples, target_size)
+                true_samples = self._downsample_prioritize_augmented(true_samples, target_size)
             if len(false_samples) > target_size:
-                false_samples = random.sample(false_samples, target_size)
+                false_samples = self._downsample_prioritize_augmented(false_samples, target_size)
 
         balanced = true_samples + false_samples
         random.shuffle(balanced)
@@ -326,6 +326,37 @@ class LieDetectionDataProcessor:
             upsampled.extend(additional)
 
         return upsampled
+
+    def _downsample_prioritize_augmented(self, samples: List[Dict], target_size: int) -> List[Dict]:
+        """Downsample samples while prioritizing those with majority vote metadata."""
+        if len(samples) <= target_size:
+            return samples
+            
+        # Separate augmented and non-augmented samples
+        augmented_samples = [s for s in samples if 'majority_vote_metadata' in s]
+        non_augmented_samples = [s for s in samples if 'majority_vote_metadata' not in s]
+        
+        logger.info(f"    Prioritizing augmented samples: {len(augmented_samples)} augmented, {len(non_augmented_samples)} non-augmented")
+        
+        # If we have more augmented samples than target, sample from augmented only
+        if len(augmented_samples) >= target_size:
+            selected = random.sample(augmented_samples, target_size)
+            logger.info(f"    Selected {len(selected)} samples (all from augmented)")
+            return selected
+        
+        # Take all augmented samples and fill remaining slots with non-augmented
+        selected = augmented_samples.copy()
+        remaining_slots = target_size - len(augmented_samples)
+        
+        if remaining_slots > 0 and non_augmented_samples:
+            additional_samples = random.sample(
+                non_augmented_samples, 
+                min(remaining_slots, len(non_augmented_samples))
+            )
+            selected.extend(additional_samples)
+        
+        logger.info(f"    Selected {len(selected)} samples ({len(augmented_samples)} augmented, {len(selected) - len(augmented_samples)} non-augmented)")
+        return selected
 
     def process_trace_messages(self, trace: List[Dict], did_lie: bool) -> List[Dict]:
         """

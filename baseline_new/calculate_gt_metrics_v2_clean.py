@@ -16,8 +16,19 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional
 import pandas as pd
+from dotenv import load_dotenv
 from sklearn.metrics import cohen_kappa_score
 import numpy as np
+
+load_dotenv()
+
+# Add the parent directory to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+from common.s3_sample_client import S3SampleClient
 
 def extract_datetime_from_filename(filename: str) -> datetime:
     """Extract datetime from filename like 'category_model_results_20250909_002043.json'"""
@@ -1007,8 +1018,87 @@ def main():
         print(f"Predictions dataframe with majority vote saved to: {predictions_file}")
         
         print("Additional analysis completed - majority vote calculated using judge models only")
+        
+        # Upload individual samples to S3
+        upload_individual_samples_to_s3(predictions_df)
 
-def main():
+def upload_individual_samples_to_s3(predictions_df):
+    """Upload individual samples from predictions dataframe to S3 using batch uploads."""
+    
+    # Define the judge models to upload
+    judge_models = ['gpt-oss-120b', 'gpt-4o', 'claude-sonnet-4', 'gpt-5', 'claude-opus-4']
+    available_models = [model for model in judge_models if model in predictions_df.columns]
+    
+    total_uploads = len(predictions_df) * len(available_models)
+    print(f"\n🔄 Preparing {total_uploads} individual samples for batch upload to S3 ({len(predictions_df)} samples × {len(available_models)} models)...")
+    
+    try:
+        s3_client = S3SampleClient(
+            bucket="dipika-lie-detection-data",
+            prefix="post-processed-data/"
+        )
+        
+        # Prepare all samples for batch upload
+        batch_samples = []
+        
+        for _, row in predictions_df.iterrows():
+            for original_model in available_models:
+                try:
+                    # Create sample data for this specific model
+                    sample_data = {
+                        "fold_name": row["fold_name"],
+                        "sample_id": row["sample_id"],
+                        "actual_sample_id": row["actual_sample_id"],
+                        "task_name": row["task_name"],
+                        "model_prediction": row[original_model],
+                        "all_model_predictions": {
+                            model_name: row[model_name] for model_name in available_models
+                        },
+                        "majority_vote": row["majority_vote"],
+                        "majority_proportion": row["majority_proportion"],
+                        "model_name": original_model,
+                        "upload_timestamp": datetime.now().isoformat()
+                    }
+                    
+                    # Add provider prefix to model name
+                    model_with_provider = original_model
+                    if 'claude' in original_model:
+                        model_with_provider = 'anthropic/' + original_model
+                    elif 'gpt' in original_model:
+                        model_with_provider = 'openai/' + original_model
+                    elif 'gemma' in original_model:
+                        model_with_provider = 'google/' + original_model
+                    
+                    # Add to batch: (model, task, sample_id, content)
+                    batch_samples.append((
+                        model_with_provider,
+                        row["task_name"],
+                        str(row["actual_sample_id"]),
+                        sample_data
+                    ))
+                        
+                except Exception as e:
+                    print(f"❌ Error preparing sample {row.get('actual_sample_id', 'unknown')} for model {original_model}: {e}")
+        
+        print(f"📦 Prepared {len(batch_samples)} samples for batch upload")
+        
+        # Perform batch upload with optimal batch size for S3
+        successful_uploads, failed_uploads = s3_client.put_samples_batch(
+            samples=batch_samples,
+            batch_size=25  # AWS S3 recommended concurrent request limit
+        )
+        
+        print(f"📊 S3 Batch Upload Summary: {successful_uploads} successful, {failed_uploads} failed")
+        print(f"📁 Files uploaded to: s3://dipika-lie-detection-data/post-processed-data/{'{provider}'}/{'{model}'}/{'{task_name}'}/{'{sample_id}'}.json")
+        print(f"🎯 Models uploaded: {', '.join(available_models)}")
+        
+        return successful_uploads, failed_uploads
+        
+    except Exception as e:
+        print(f"❌ Error setting up S3 client: {e}")
+        return 0, total_uploads
+
+def main2():
     """Main function to calculate inter-rater reliability metrics."""
     parser = argparse.ArgumentParser(description="Calculate Cohen's kappa inter-rater reliability scores for GT labelling results")
     parser.add_argument("--input_dir", "-i", type=str, default="results/gt_labelling_rowan_modified",
@@ -1417,6 +1507,13 @@ def main():
         print("No human annotations found in the data.")
         with open(summary_file, 'a') as f:
             f.write("No human annotations found in the data.\n")
+
+    predictions_file = f"{args.output_prefix}_predictions_dataframe.csv"
+    predictions_df.to_csv(predictions_file, index=False)
+    print(f"Predictions dataframe with majority vote saved to: {predictions_file}")
+
+    # Upload individual samples to S3
+    upload_individual_samples_to_s3(predictions_df)
 
 def process_gt_labelling_results(results_dir: str) -> Dict[str, Any]:
     """

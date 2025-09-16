@@ -107,9 +107,20 @@ class BaseSampleProcessingHook(Hooks):
                         parsed_entry = parsed_sample.dict(exclude_none=True)
                         all_entries.append(parsed_entry)
                     else:
-                        # Prepare upload task
-                        task_name = parsed_sample['task']
-                        sample_id = parsed_sample['sample_id']
+                        # Prepare upload task for raw dict samples
+                        # Extract task and sample_id from the structured info or evaluation context
+                        if 'task_name' in parsed_sample and parsed_sample['task_name']:
+                            task_name = parsed_sample['task_name']
+                        elif 'evaluation_context' in parsed_sample:
+                            task_name = parsed_sample['evaluation_context']['task_name']
+                        else:
+                            task_name = 'unknown_task'
+                            
+                        if 'sample_id' in parsed_sample and parsed_sample['sample_id']:
+                            sample_id = parsed_sample['sample_id']
+                        else:
+                            sample_id = f"sample_{len(all_entries)}"
+                        
                         parsed_entry = parsed_sample
 
                     all_entries.append(parsed_entry)
@@ -119,8 +130,15 @@ class BaseSampleProcessingHook(Hooks):
 
                     sample_info.append(sample_id)
 
+                    # Get model from sample or eval_log
+                    model_name = 'unknown'
+                    if hasattr(sample, 'output') and hasattr(sample.output, 'model') and sample.output.model:
+                        model_name = sample.output.model
+                    elif hasattr(eval_log.eval, 'model') and eval_log.eval.model:
+                        model_name = eval_log.eval.model
+                    
                     upload_task = self.upload_sample_async(
-                        sample.output.model,
+                        model_name,
                         task_name,
                         sample_id,
                         parsed_entry
@@ -172,10 +190,11 @@ class BaseSampleProcessingHook(Hooks):
         Hook that runs at the very end of the entire run (after all tasks).
         This is where we clean up the executor.
         """
-        # Shutdown the executor when the entire run is complete
-        if hasattr(self, 'executor') and self.executor:
-            self.executor.shutdown(wait=True)
-            print(f"[LogParserHook] Executor shutdown complete")
+        # Don't shutdown the executor here as it's shared across multiple tasks
+        # The executor will be cleaned up when the process ends
+        # This prevents "cannot schedule new futures after shutdown" errors
+        # in multi-baseline evaluations
+        pass
 
     @abstractmethod
     def process_sample(self, sample: Any, eval_log: EvalLog) -> Optional[LieDetectionSample]:

@@ -115,12 +115,28 @@ class S3SampleClient:
             clean_domain = self._clean_name(domain)
             clean_sample_id = self.generate_sample_id(sample_id)
 
+            #if 'sandbagging' not in clean_task and 'sandbagging' not in clean_domain:
+            #    return False
+
             did_lie = content['did_lie'] if 'did_lie' in content else "_"
             truth_tag = "t_" if did_lie else "f_"
 
+            if 'majority_vote' in content:
+                did_lie = content['majority_vote'] == 'B'
+
+
             # Create S3 key: prefix/provider/model/domain/task/sample_id.json
             # This matches the structure from map_sample_to_s3_path
-            key = f"{self.prefix}{clean_provider}/{clean_model}/{clean_domain}/{clean_task}/{truth_tag}{clean_sample_id}.json"
+
+            if (content['fold_name'].replace('-', '_') not in clean_domain and
+                    content['fold_name'].replace('-', '_') not in clean_task and
+                    'mask' not in clean_task or
+                    'sandbagging' in clean_domain or
+                    'sycophancy' in clean_domain
+            ):
+                key = f"{self.prefix}{clean_provider}/{clean_model}/{clean_domain}/{clean_task}/{truth_tag}{clean_sample_id}.json"
+            else:
+                key = f"{self.prefix}{clean_provider}/{clean_model}/{clean_task}/{clean_domain}/{truth_tag}{clean_sample_id}.json"
             
             # Convert content to JSON string
             json_content = json.dumps(content, indent=2)
@@ -445,3 +461,69 @@ class S3SampleClient:
         except Exception as e:
             print(f"Error checking S3 file existence: {e}")
             return False
+    
+    def put_samples_batch(self, samples: List[Tuple[str, str, str, Dict[str, Any]]], batch_size: int = 50) -> Tuple[int, int]:
+        """
+        Upload multiple samples to S3 in batches using concurrent uploads.
+        
+        Args:
+            samples: List of (model, task, sample_id, content) tuples
+            batch_size: Number of samples to upload concurrently (default: 25, AWS S3 recommended limit)
+            
+        Returns:
+            Tuple of (successful_uploads, failed_uploads)
+        """
+        if not self.enabled:
+            return 0, len(samples)
+        
+        import concurrent.futures
+        import threading
+        
+        successful_uploads = 0
+        failed_uploads = 0
+        upload_lock = threading.Lock()
+        
+        def upload_single_sample(sample_data):
+            """Upload a single sample and return success status."""
+            model, task, sample_id, content = sample_data
+            try:
+                success = self.put_sample(model, task, sample_id, content)
+                return success
+            except Exception as e:
+                print(f"[S3SampleClient] Batch upload error for {model}/{task}/{sample_id}: {e}")
+                return False
+        
+        print(f"[S3SampleClient] Starting batch upload of {len(samples)} samples with batch size {batch_size}...")
+        
+        # Process samples in batches
+        for i in range(0, len(samples), batch_size):
+            batch = samples[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            total_batches = (len(samples) + batch_size - 1) // batch_size
+            
+            print(f"[S3SampleClient] Processing batch {batch_num}/{total_batches} ({len(batch)} samples)...")
+            
+            # Upload batch concurrently
+            with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+                future_to_sample = {executor.submit(upload_single_sample, sample): sample for sample in batch}
+                
+                for future in concurrent.futures.as_completed(future_to_sample):
+                    sample = future_to_sample[future]
+                    try:
+                        success = future.result()
+                        with upload_lock:
+                            if success:
+                                successful_uploads += 1
+                            else:
+                                failed_uploads += 1
+                    except Exception as e:
+                        print(f"[S3SampleClient] Exception in batch upload: {e}")
+                        with upload_lock:
+                            failed_uploads += 1
+            
+            # Progress update
+            total_processed = i + len(batch)
+            print(f"[S3SampleClient] Batch {batch_num} complete. Total processed: {total_processed}/{len(samples)}")
+        
+        print(f"[S3SampleClient] Batch upload complete: {successful_uploads} successful, {failed_uploads} failed")
+        return successful_uploads, failed_uploads

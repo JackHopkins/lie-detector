@@ -69,3 +69,12 @@ __pycache__
 *.log
 /.together2/
 /.together-120b/
+/baseline_new/results/
+/baseline_new/results_baseline_reorganized/
+/baseline_new/results_baseline_with_defs/
+/baseline_new/results_baselines_revised/
+/baseline_new/results_gt/
+/baseline_new/results_large/
+/baseline_new/results_no_metadata/
+/baseline_new/results_with_metadata/
+/baseline_new/results_with_metadatav2/

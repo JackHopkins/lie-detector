@@ -12,6 +12,9 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
+from dotenv import load_dotenv
+
+load_dotenv()
 # Set the log directory to be within baseline_new instead of .data
 current_dir = os.path.dirname(os.path.abspath(__file__))
 os.environ["INSPECT_LOG_DIR"] = os.path.join(current_dir, "logs")
@@ -26,8 +29,8 @@ if parent_dir not in sys.path:
 from utils import post_process_results
 
 # Configuration
-ORGANIZED_DIR = "/Users/dipikakhullar/Desktop/lie_detector_clone/lie-detector/.data/openai/gpt_oss_120b"
-NUM_SAMPLES = 100  # Set to a number to limit samples, or None for all
+ORGANIZED_DIR = "../.data/openai/gpt_oss_120b"
+NUM_SAMPLES = 2  # Set to a number to limit samples, or None for all
 BASELINE_TYPES = ["llama_chat", "base_transcript", "rowans_escaped_transcript", "llama_chat_reasoning", "rowans_escaped_transcript_reasoning"]
 EVALUATION_MODEL = "openrouter/openai/gpt-oss-120b"  # Model to use for evaluation
 UPDATE_S3 = True  # Set to True to automatically update S3 files with baseline results
