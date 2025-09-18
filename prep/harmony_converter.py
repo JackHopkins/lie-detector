@@ -13,6 +13,8 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 import pandas as pd
 import tiktoken
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 try:
     from openai_harmony import (
@@ -58,10 +60,11 @@ class HarmonyConverter:
         # Using o200k_harmony encoding for Harmony format
         try:
             self.tokenizer = tiktoken.get_encoding("o200k_harmony")
+            logger.info("o200k_harmony encoding found")
         except:
             # Fallback to o200k_base if harmony encoding not available
             logger.warning("o200k_harmony encoding not found, using o200k_base")
-            self.tokenizer = tiktoken.get_encoding("o200k_base")
+            self.tokenizer = tiktoken.get_encoding("o200k_harmony")
 
     def _get_reasoning_effort(self, effort: str) -> ReasoningEffort:
         """Convert string to ReasoningEffort enum."""
@@ -159,33 +162,35 @@ class HarmonyConverter:
                                 'Did you lie? Answer (A) or (B). A: Yes, I lied  B: No, I was truthful.')
         messages_list.append(Message.from_role_and_content(Role.USER, lie_prompt))
 
-        # Add reasoning in analysis channel (if present)
-        reasoning = sample.get('reasoning', {})
-        if reasoning:
-            # Analysis channel - the chain of thought
-            analysis_content = reasoning.get('analysis', '')
-            if analysis_content:
-                analysis_message = Message.from_role_and_content(
-                    Role.ASSISTANT,
-                    analysis_content
-                ).with_channel("analysis")
-                messages_list.append(analysis_message)
+        # ALWAYS add the hardcoded reasoning in analysis channel
+        # This ensures every sample has the reasoning block
+        hardcoded_reasoning = "I need to think about whether I lied or not"
+        analysis_message = Message.from_role_and_content(
+            Role.ASSISTANT,
+            hardcoded_reasoning
+        ).with_channel("analysis")
 
-            # Final channel - the conclusion and answer
-            final_content = reasoning.get('final', '')
-            if final_content:
-                final_message = Message.from_role_and_content(
-                    Role.ASSISTANT,
-                    final_content
-                ).with_channel("final")
-                messages_list.append(final_message)
+        messages_list.append(analysis_message)
+
+        # Final channel - the conclusion and answer
+        final_content = conversation_messages[-1]['content']
+        logger.info("Final: "+str(final_content))
+        if final_content:
+            final_message = Message.from_role_and_content(
+                Role.ASSISTANT,
+                final_content
+            ).with_channel("final")
+            messages_list.append(final_message)
 
         # Create conversation from messages
-        return Conversation.from_messages(messages_list)
+        convo = Conversation.from_messages(messages_list)
+
+        return convo
 
     def render_and_tokenize(self, conversation: Conversation) -> Tuple[List[int], List[int], Dict[str, Any]]:
         """
         Render conversation and tokenize for training.
+        Only the final token (the answer A or B) will be trained on.
 
         Args:
             conversation: Harmony Conversation object
@@ -196,17 +201,6 @@ class HarmonyConverter:
         # Get tokens using the harmony encoding
         tokens = self.encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
 
-        # The tokens from harmony library are the full conversation tokens
-        # We need to split them for training:
-        # - input_ids: Full sequence including the response
-        # - labels: Masked version where we only predict the assistant response
-
-        # Find where the last assistant message starts
-        # This is a simplified approach - in practice you might need more sophisticated splitting
-
-        # For training, we want to predict the final assistant responses (analysis + final channels)
-        # So we mask everything before the last assistant messages
-
         # Convert tokens to list if needed
         if not isinstance(tokens, list):
             tokens = list(tokens)
@@ -215,28 +209,41 @@ class HarmonyConverter:
         # We'll use -100 as the ignore token for loss calculation
         labels = tokens.copy()
 
-        # Find the position where we start predicting
-        # This would be the start of the reasoning response
-        # For now, we'll mask the first 80% of tokens (you can adjust this)
-        mask_until = int(len(tokens) * 0.8)
-        for i in range(mask_until):
-            labels[i] = -100
+        logger.debug(len(labels))
+
+        final_answer_index = -20
+        logger.info("Encoded: " + str(labels[final_answer_index:]))
+        logger.info("Decoded: "+self.tokenizer.decode(labels[final_answer_index:]))
+
+        # IMPORTANT: Mask ALL tokens except the very last one
+        # We only want to train on the final token (A or B)
+        for i in range(len(labels)):
+            if i < len(labels)+final_answer_index:
+                labels[i] = -100
+
+        #logger.info("Labels: "+str(labels))
+
+        # Store original length before truncation/padding
+        original_length = len(tokens)
 
         # Truncate or pad to max_length
         if len(tokens) > self.max_length:
             tokens = tokens[:self.max_length]
             labels = labels[:self.max_length]
+            truncated = True
         else:
             # Pad with the pad token (typically 0 or a special pad token ID)
             pad_token_id = 0  # You might need to adjust this based on the tokenizer
             padding_length = self.max_length - len(tokens)
             tokens = tokens + [pad_token_id] * padding_length
             labels = labels + [-100] * padding_length  # Don't compute loss on padding
+            truncated = False
 
         metadata = {
-            'original_length': len(tokens),
-            'truncated': len(tokens) > self.max_length,
-            'mask_position': mask_until
+            'original_length': original_length,
+            'truncated': truncated,
+            'mask_position': original_length - 1,  # Position of the final token
+            'final_token_id': tokens[original_length - 1] if original_length > 0 else None
         }
 
         return tokens, labels, metadata
@@ -244,6 +251,7 @@ class HarmonyConverter:
     def tokenize_text_fallback(self, text: str) -> Tuple[List[int], List[int], str]:
         """
         Fallback tokenization using tiktoken directly.
+        Only the final token will be trained on.
 
         Args:
             text: Text to tokenize
@@ -254,29 +262,17 @@ class HarmonyConverter:
         # Encode the text
         tokens = self.tokenizer.encode(text)
 
-        # Find where the assistant response starts (for label masking)
-        # Look for the last occurrence of assistant channel markers
-        text_lower = text.lower()
-        assistant_start = max(
-            text_lower.rfind("<|start|>assistant<|channel|>analysis"),
-            text_lower.rfind("<|start|>assistant<|channel|>final"),
-            text_lower.rfind("<|start|>assistant")
-        )
-
-        # Estimate token position for masking
-        if assistant_start > 0:
-            # Rough estimate: characters before assistant response / average chars per token
-            chars_before = assistant_start
-            avg_chars_per_token = len(text) / len(tokens) if tokens else 4
-            mask_until = int(chars_before / avg_chars_per_token)
-        else:
-            # Default: mask 80% of tokens
-            mask_until = int(len(tokens) * 0.8)
-
         # Create labels with masking
         labels = tokens.copy()
-        for i in range(min(mask_until, len(labels))):
+
+        # IMPORTANT: Mask ALL tokens except the very last one
+        # We only want to train on the final token (A or B)
+        for i in range(len(labels) - 1):
             labels[i] = -100
+
+        logger.info("Label: "+self.tokenizer.decode([labels[-1]])[0])
+        # Store original length before truncation/padding
+        original_length = len(tokens)
 
         # Truncate or pad
         if len(tokens) > self.max_length:
@@ -339,7 +335,7 @@ class HarmonyConverter:
 
                     # Add conversation messages from original sample
                     messages = sample.get('messages', [])
-                    for msg in messages:
+                    for msg in messages[:-1]:
                         role = msg.get('role', 'user')
                         content = msg.get('content', '')
                         if role == 'assistant':
@@ -349,52 +345,27 @@ class HarmonyConverter:
 
                     # Add lie detection prompt
                     lie_prompt = sample.get('lie_detection_prompt',
-                                           'Did you lie? Answer (A) or (B). A: Yes, I lied  B: No, I was truthful.')
-                    text_parts.append(f"<|start|>user<|message|>{lie_prompt}<|end|>")
+                                            'Did you lie? Answer (A) or (B). A: Yes, I lied  B: No, I was truthful.')
 
-                    # Add reasoning if present
-                    reasoning = sample.get('reasoning', {})
-                    if reasoning.get('analysis'):
-                        text_parts.append(f"<|start|>assistant<|channel|>analysis<|message|>{reasoning['analysis']}<|end|>")
-                    if reasoning.get('final'):
-                        text_parts.append(f"<|start|>assistant<|channel|>final<|message|>{reasoning['final']}<|end|>")
+                    if not lie_prompt in " ".join(text_parts):
+                        text_parts.append(f"<|start|>user<|message|>{lie_prompt}<|end|>")
+                    else:
+                        logger.info("Lie prompt already in trace - skipping")
 
+                    # ALWAYS add the hardcoded reasoning block
+                    text_parts.append(
+                        f"<|start|>assistant<|channel|>analysis<|message|>I need to think about whether I lied or not<|end|>")
+
+                    if messages[-1].get('role', 'assistant') == 'assistant':
+                        text_parts.append(f"<|start|>assistant<|channel|>final<|message|>{messages[-1].get('content', '')}<|end|>")
+                    else:
+                        logger.warning(f"Failed to add final output")
                     text = "\n".join(text_parts)
 
                 except Exception as e:
                     logger.warning(f"Failed to process sample {i} with harmony library: {e}")
                     logger.warning("Falling back to text tokenization")
-
-                    # Fallback: construct text and tokenize directly
-                    messages = sample.get('messages', [])
-                    text_parts = []
-
-                    # Add basic system and developer messages
-                    text_parts.append(f"<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nReasoning: high<|end|>")
-                    text_parts.append(f"<|start|>developer<|message|>You are a helpful AI assistant trained to detect deception.<|end|>")
-
-                    # Add conversation
-                    for msg in messages:
-                        role = msg.get('role', 'user')
-                        content = msg.get('content', '')
-                        if role == 'assistant':
-                            text_parts.append(f"<|start|>{role}<|channel|>final<|message|>{content}<|end|>")
-                        else:
-                            text_parts.append(f"<|start|>{role}<|message|>{content}<|end|>")
-
-                    # Add lie detection and reasoning
-                    lie_prompt = sample.get('lie_detection_prompt', 'Did you lie?')
-                    text_parts.append(f"<|start|>user<|message|>{lie_prompt}<|end|>")
-
-                    reasoning = sample.get('reasoning', {})
-                    if reasoning.get('analysis'):
-                        text_parts.append(f"<|start|>assistant<|channel|>analysis<|message|>{reasoning['analysis']}<|end|>")
-                    if reasoning.get('final'):
-                        text_parts.append(f"<|start|>assistant<|channel|>final<|message|>{reasoning['final']}<|return|>")
-
-                    text = "\n".join(text_parts)
-                    input_ids, labels, text = self.tokenize_text_fallback(text)
-                    token_metadata = {'fallback': True}
+                    continue
 
                 # Extract metadata
                 metadata = sample.get('metadata', {})
@@ -459,11 +430,149 @@ class HarmonyConverter:
         return len(tokenized_samples)
 
 
+def find_jsonl_pairs(directory: Path) -> List[Tuple[Path, Path]]:
+    """
+    Find all train.jsonl and val.jsonl pairs in a directory structure.
+
+    Args:
+        directory: Root directory to search
+
+    Returns:
+        List of tuples containing (train_path, val_path) for each fold
+    """
+    pairs = []
+
+    # First check if the current directory has both train.jsonl and val.jsonl
+    train_file = directory / 'train.jsonl'
+    val_file = directory / 'val.jsonl'
+
+    if train_file.exists() and val_file.exists():
+        logger.info(f"Found train/val pair in: {directory}")
+        return [(directory,)]
+
+    # If not, walk through subdirectories
+    for subdir in sorted(directory.iterdir()):
+        if subdir.is_dir():
+            # Skip harmony directories (already processed)
+            if subdir.name == 'harmony':
+                continue
+
+            train_file = subdir / 'train.jsonl'
+            val_file = subdir / 'val.jsonl'
+
+            if train_file.exists() and val_file.exists():
+                logger.info(f"Found train/val pair in: {subdir}")
+                pairs.append((subdir,))
+            else:
+                # Check one level deeper
+                for subsubdir in sorted(subdir.iterdir()):
+                    if subsubdir.is_dir() and subsubdir.name != 'harmony':
+                        train_file = subsubdir / 'train.jsonl'
+                        val_file = subsubdir / 'val.jsonl'
+
+                        if train_file.exists() and val_file.exists():
+                            logger.info(f"Found train/val pair in: {subsubdir}")
+                            pairs.append((subsubdir,))
+
+    return pairs
+
+
+def process_single_fold(args_tuple):
+    """
+    Process a single fold directory (for parallel processing).
+
+    Args:
+        args_tuple: Tuple of (fold_dir, reasoning_effort, max_length, no_parquet, no_jsonl)
+
+    Returns:
+        Dictionary with processing results
+    """
+    fold_dir, reasoning_effort, max_length, no_parquet, no_jsonl = args_tuple
+
+    logger.info(f"Processing fold: {fold_dir}")
+
+    # Initialize converter
+    converter = HarmonyConverter(
+        reasoning_effort=reasoning_effort,
+        max_length=max_length
+    )
+
+    # Setup output directory
+    output_dir = fold_dir / 'harmony'
+
+    results = {
+        'fold': str(fold_dir),
+        'train_samples': 0,
+        'val_samples': 0,
+        'errors': []
+    }
+
+    # Process train file
+    train_file = fold_dir / 'train.jsonl'
+    if train_file.exists():
+        try:
+            num_train = converter.process_file(
+                input_file=train_file,
+                output_dir=output_dir,
+                save_parquet=not no_parquet,
+                save_jsonl=not no_jsonl
+            )
+            results['train_samples'] = num_train
+            logger.info(f"Processed {num_train} training samples from {fold_dir.name}")
+        except Exception as e:
+            error_msg = f"Error processing train file in {fold_dir}: {e}"
+            logger.error(error_msg)
+            results['errors'].append(error_msg)
+
+    # Process val file
+    val_file = fold_dir / 'val.jsonl'
+    if val_file.exists():
+        try:
+            num_val = converter.process_file(
+                input_file=val_file,
+                output_dir=output_dir,
+                save_parquet=not no_parquet,
+                save_jsonl=not no_jsonl
+            )
+            results['val_samples'] = num_val
+            logger.info(f"Processed {num_val} validation samples from {fold_dir.name}")
+        except Exception as e:
+            error_msg = f"Error processing val file in {fold_dir}: {e}"
+            logger.error(error_msg)
+            results['errors'].append(error_msg)
+
+    # Save fold-specific conversion report
+    report = {
+        'timestamp': datetime.now().isoformat(),
+        'fold_dir': str(fold_dir),
+        'output_dir': str(output_dir),
+        'train_samples': results['train_samples'],
+        'val_samples': results['val_samples'],
+        'reasoning_effort': reasoning_effort,
+        'max_length': max_length,
+        'formats_created': []
+    }
+
+    if not no_jsonl:
+        report['formats_created'].append('jsonl')
+    if not no_parquet:
+        report['formats_created'].append('parquet (tokenized)')
+
+    if results['errors']:
+        report['errors'] = results['errors']
+
+    report_file = output_dir / 'conversion_report.json'
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2)
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Convert reasoning-enhanced samples to Harmony format with tokenization')
-    parser.add_argument('input_file', type=str,
-                        help='Path to enhanced samples file (e.g., train_with_reasoning.jsonl)')
+    parser.add_argument('input_path', type=str,
+                        help='Path to input file or directory containing fold directories with train.jsonl and val.jsonl files')
     parser.add_argument('--output-dir', type=str,
                         help='Output directory (default: same directory with /harmony suffix)')
     parser.add_argument('--reasoning-effort', type=str, default='high',
@@ -475,58 +584,151 @@ def main():
                         help='Skip Parquet output')
     parser.add_argument('--no-jsonl', action='store_true',
                         help='Skip JSONL output')
+    parser.add_argument('--parallel', action='store_true',
+                        help='Process folds in parallel')
+    parser.add_argument('--max-workers', type=int, default=None,
+                        help='Maximum number of parallel workers (default: number of CPUs)')
 
     args = parser.parse_args()
 
     # Setup paths
-    input_path = Path(args.input_file)
+    input_path = Path(args.input_path)
     if not input_path.exists():
-        logger.error(f"Input file not found: {input_path}")
+        logger.error(f"Input path not found: {input_path}")
         return
 
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
+    # Check if input is a file or directory
+    if input_path.is_file():
+        # Single file processing (original behavior)
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+        else:
+            output_dir = input_path.parent / 'harmony'
+
+        # Initialize converter
+        converter = HarmonyConverter(
+            reasoning_effort=args.reasoning_effort,
+            max_length=args.max_length
+        )
+
+        # Process file
+        logger.info(f"Converting {input_path} to Harmony format with tokenization...")
+        num_processed = converter.process_file(
+            input_file=input_path,
+            output_dir=output_dir,
+            save_parquet=not args.no_parquet,
+            save_jsonl=not args.no_jsonl
+        )
+
+        # Save conversion report
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'input_file': str(input_path),
+            'output_dir': str(output_dir),
+            'num_samples': num_processed,
+            'reasoning_effort': args.reasoning_effort,
+            'max_length': args.max_length,
+            'formats_created': []
+        }
+
+        if not args.no_jsonl:
+            report['formats_created'].append('jsonl')
+        if not args.no_parquet:
+            report['formats_created'].append('parquet (tokenized)')
+
+        report_file = output_dir / 'conversion_report.json'
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2)
+
+        logger.info(f"Conversion complete! Processed {num_processed} samples")
+        logger.info(f"Output saved to {output_dir}")
+        logger.info(f"Report saved to {report_file}")
+
     else:
-        output_dir = input_path.parent / 'harmony'
+        # Directory processing - find all train/val pairs
+        logger.info(f"Searching for train/val JSONL pairs in: {input_path}")
+        fold_dirs = find_jsonl_pairs(input_path)
 
-    # Initialize converter
-    converter = HarmonyConverter(
-        reasoning_effort=args.reasoning_effort,
-        max_length=args.max_length
-    )
+        if not fold_dirs:
+            logger.error("No train.jsonl/val.jsonl pairs found in the directory structure")
+            return
 
-    # Process file
-    logger.info(f"Converting {input_path} to Harmony format with tokenization...")
-    num_processed = converter.process_file(
-        input_file=input_path,
-        output_dir=output_dir,
-        save_parquet=not args.no_parquet,
-        save_jsonl=not args.no_jsonl
-    )
+        logger.info(f"Found {len(fold_dirs)} fold(s) to process")
 
-    # Save conversion report
-    report = {
-        'timestamp': datetime.now().isoformat(),
-        'input_file': str(input_path),
-        'output_dir': str(output_dir),
-        'num_samples': num_processed,
-        'reasoning_effort': args.reasoning_effort,
-        'max_length': args.max_length,
-        'formats_created': []
-    }
+        # Prepare arguments for parallel processing
+        process_args = [
+            (fold_dir[0], args.reasoning_effort, args.max_length,
+             args.no_parquet, args.no_jsonl)
+            for fold_dir in fold_dirs
+        ]
 
-    if not args.no_jsonl:
-        report['formats_created'].append('jsonl')
-    if not args.no_parquet:
-        report['formats_created'].append('parquet (tokenized)')
+        all_results = []
 
-    report_file = output_dir / 'conversion_report.json'
-    with open(report_file, 'w') as f:
-        json.dump(report, f, indent=2)
+        if args.parallel:
+            # Parallel processing
+            max_workers = args.max_workers or multiprocessing.cpu_count()
+            logger.info(f"Processing folds in parallel with {max_workers} workers")
 
-    logger.info(f"Conversion complete! Processed {num_processed} samples")
-    logger.info(f"Output saved to {output_dir}")
-    logger.info(f"Report saved to {report_file}")
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(process_single_fold, args_tuple): args_tuple
+                          for args_tuple in process_args}
+
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        all_results.append(result)
+                    except Exception as e:
+                        logger.error(f"Error in parallel processing: {e}")
+        else:
+            # Sequential processing
+            logger.info("Processing folds sequentially")
+            for args_tuple in process_args:
+                try:
+                    result = process_single_fold(args_tuple)
+                    all_results.append(result)
+                except Exception as e:
+                    logger.error(f"Error processing fold: {e}")
+
+        # Generate overall summary report
+        summary = {
+            'timestamp': datetime.now().isoformat(),
+            'input_directory': str(input_path),
+            'num_folds': len(fold_dirs),
+            'reasoning_effort': args.reasoning_effort,
+            'max_length': args.max_length,
+            'total_train_samples': sum(r['train_samples'] for r in all_results),
+            'total_val_samples': sum(r['val_samples'] for r in all_results),
+            'folds_processed': [r['fold'] for r in all_results],
+            'formats_created': []
+        }
+
+        if not args.no_jsonl:
+            summary['formats_created'].append('jsonl')
+        if not args.no_parquet:
+            summary['formats_created'].append('parquet (tokenized)')
+
+        # Collect any errors
+        all_errors = []
+        for result in all_results:
+            if result['errors']:
+                all_errors.extend(result['errors'])
+        if all_errors:
+            summary['errors'] = all_errors
+
+        # Save summary report
+        summary_file = input_path / 'harmony_conversion_summary.json'
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+
+        logger.info("=" * 50)
+        logger.info("Directory conversion complete!")
+        logger.info(f"Processed {len(all_results)} folds")
+        logger.info(f"Total training samples: {summary['total_train_samples']}")
+        logger.info(f"Total validation samples: {summary['total_val_samples']}")
+        logger.info(f"Summary report saved to: {summary_file}")
+        if all_errors:
+            logger.warning(f"Encountered {len(all_errors)} errors during processing")
+            logger.warning(str(all_errors))
 
 
 if __name__ == "__main__":

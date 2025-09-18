@@ -45,7 +45,7 @@ python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120
 python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120b/games --wait
 
 # Train all 5 epochs sequentially
-python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120b/games --all-epochs
+python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120b/games --all-epochs --learning-rate 5e-6
 
 # Get deployment information
 python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120b/games --deploy-info
@@ -210,6 +210,26 @@ python -m together_training.epoch.train_epochs path/to/fold \
 - Run Names: Auto-generated with fold name and epoch
 - Metrics: Loss, accuracy, evaluation results
 - Hyperparameters: Learning rate, model, epoch info
+
+### Advanced Learning Rate Scheduling
+
+The system implements sophisticated learning rate management:
+
+**Two-Level Learning Rate Decay:**
+1. **Cross-Epoch Decay**: 33% decay per epoch (`0.67^epoch_num`)
+   - Epoch 0: Full learning rate (e.g., 3e-5)
+   - Epoch 1: 67% of base rate (e.g., 2.01e-5)  
+   - Epoch 2: 45% of base rate (e.g., 1.35e-5)
+
+2. **Intra-Epoch Linear Scheduler**: Within each epoch, linear decay to 66% of starting rate
+   - Uses TogetherAI's `lr_scheduler` with `linear` type
+   - `min_lr_ratio: 0.66` ensures gradual decrease throughout the epoch
+   - Provides smooth learning rate transitions within each training step
+
+**Benefits:**
+- **Stability**: Prevents learning rate spikes between epochs
+- **Convergence**: Gradual decrease helps fine-tuning converge smoothly  
+- **Flexibility**: Allows deployment of models trained at different learning rates
 
 **Environment Variable Alternative:**
 ```bash

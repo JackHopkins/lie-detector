@@ -6,6 +6,7 @@ This module implements the main training orchestrator that manages
 incremental training runs with automatic resumption and state persistence.
 """
 
+import os
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -24,7 +25,7 @@ class EpochTrainer:
     def __init__(self, 
                  api_key: str,
                  base_model: str = "openai/gpt-oss-120b",
-                 learning_rate: float = 3e-5,
+                 learning_rate: float = 1e-4,
                  wandb_api_key: Optional[str] = None,
                  wandb_project_name: Optional[str] = None):
         """
@@ -41,8 +42,10 @@ class EpochTrainer:
         self.api_key = api_key
         self.base_model = base_model
         self.learning_rate = learning_rate
-        self.wandb_api_key = wandb_api_key
-        self.wandb_project_name = wandb_project_name or "lie-detection-epoch-training"
+        
+        # Check for wandb keys in environment if not provided
+        self.wandb_api_key = wandb_api_key or os.getenv('WANDB_API_KEY')
+        self.wandb_project_name = wandb_project_name or os.getenv('WANDB_PROJECT') or "lie-detection-epoch-training"
     
     def _normalize_status(self, api_status) -> str:
         """
@@ -155,9 +158,30 @@ class EpochTrainer:
                 'current_epoch': current_epoch
             }
         
-        # Determine base model for this epoch
-        base_model_for_epoch = training_state.get_base_model_for_epoch(current_epoch)
-        print(f"Base model for epoch {current_epoch}: {base_model_for_epoch}")
+        # Determine if we need to continue from a checkpoint or start from base model
+        if current_epoch == 0:
+            # First epoch - start from base model
+            base_model_for_epoch = self.base_model
+            from_checkpoint = None
+            print(f"Base model for epoch {current_epoch}: {base_model_for_epoch}")
+        else:
+            # Find the previous completed epoch's job ID for checkpoint
+            prev_epoch = current_epoch - 1
+            while prev_epoch >= 0:
+                prev_epoch_info = training_state.get_epoch_info(prev_epoch)
+                if (prev_epoch_info and 
+                    prev_epoch_info.status == "completed" and 
+                    prev_epoch_info.job_id):
+                    from_checkpoint = prev_epoch_info.job_id
+                    base_model_for_epoch = None  # Not used when from_checkpoint is set
+                    print(f"Continuing from checkpoint (epoch {prev_epoch} job): {from_checkpoint}")
+                    break
+                prev_epoch -= 1
+            else:
+                # Fallback to base model if no previous checkpoint found
+                base_model_for_epoch = self.base_model
+                from_checkpoint = None
+                print(f"No previous checkpoint found, using base model: {base_model_for_epoch}")
         
         # Create training job
         try:
@@ -166,7 +190,8 @@ class EpochTrainer:
                 val_file_id=val_file_id,
                 model=base_model_for_epoch,
                 epoch_num=current_epoch,
-                fold_name=fold_path.name
+                fold_name=fold_path.name,
+                from_checkpoint=from_checkpoint
             )
         except Exception as e:
             return {
@@ -175,8 +200,11 @@ class EpochTrainer:
                 'current_epoch': current_epoch
             }
         
+        # Calculate learning rate for this epoch (for record keeping)
+        epoch_learning_rate = self.learning_rate * (0.67 ** current_epoch)
+        
         # Update training state
-        training_state.add_epoch(current_epoch, job_id, self.learning_rate)
+        training_state.add_epoch(current_epoch, job_id, epoch_learning_rate)
         
         print(f"✓ Training job started: {job_id}")
         print(f"Epoch {current_epoch} training in progress...")
@@ -383,39 +411,61 @@ class EpochTrainer:
                            val_file_id: str,
                            model: str,
                            epoch_num: int,
-                           fold_name: str) -> str:
+                           fold_name: str,
+                           from_checkpoint: str = None) -> str:
         """Create a TogetherAI fine-tuning job for one epoch."""
         suffix = f"lie-{fold_name}-epoch{epoch_num}-{int(time.time())}"
+        
+        # Calculate learning rate with 33% decay per epoch
+        current_learning_rate = self.learning_rate * (0.67 ** epoch_num)
         
         job_params = {
             'training_file': train_file_id,
             'validation_file': val_file_id,
-            'model': model,
             'n_epochs': 1,  # Always train for exactly 1 epoch
-            'learning_rate': self.learning_rate,
+            'learning_rate': current_learning_rate,
             'train_on_inputs': 'auto',  # Use auto for better compatibility
             'lora': True,
             'suffix': suffix,
             'n_evals': 2,  # Match your example (more evaluations)
             'n_checkpoints': 1,  # Match your example (more checkpoints)
             'warmup_ratio': 0,  # Match your example
+            # 'lr_scheduler_type': 'linear',
+            # 'lr_scheduler_args': {
+            #     'min_lr_ratio': 0.66  # End at 66% of starting learning rate
+            # },
+            "lr_scheduler_type": "linear",
+            "min_lr_ratio": 0.66
         }
+        
+        # Use from_checkpoint for continuing training or model for new training
+        if from_checkpoint:
+            job_params['from_checkpoint'] = from_checkpoint
+        else:
+            job_params['model'] = model
         
         # Add wandb logging if available
         if self.wandb_api_key:
             job_params['wandb_api_key'] = self.wandb_api_key
-            job_params['wandb_project_name'] = self.wandb_project_name
+            # Create wandb project name with fold suffix
+            wandb_project_with_fold = self.wandb_project_name+f"-{fold_name}"
+            job_params['wandb_project_name'] = wandb_project_with_fold
         
         try:
             print(f"Creating training job with parameters:")
-            print(f"  Model: {model}")
+            if from_checkpoint:
+                print(f"  From checkpoint: {from_checkpoint}")
+            else:
+                print(f"  Model: {model}")
             print(f"  Epochs: 1")
-            print(f"  Learning Rate: {self.learning_rate}")
+            print(f"  Learning Rate: {current_learning_rate} (base: {self.learning_rate}, decay: {0.67 ** epoch_num:.4f})")
+            print(f"  LR Scheduler: linear (end at 66% of start rate)")
             print(f"  Suffix: {suffix}")
             print(f"  N Evals: {job_params['n_evals']}")
             print(f"  N Checkpoints: {job_params['n_checkpoints']}")
             if self.wandb_api_key:
-                print(f"  WANDB Project: {self.wandb_project_name}")
+                wandb_project_with_fold = self.wandb_project_name+f"-{fold_name}"
+                print(f"  WANDB Project: {wandb_project_with_fold}")
                 print(f"  WANDB Logging: Enabled")
             else:
                 print(f"  WANDB Logging: Disabled")
@@ -563,3 +613,96 @@ class EpochTrainer:
             }
         
         return deployment_info
+    
+    def abort_fold_training(self, fold_path: str) -> Dict[str, Any]:
+        """
+        Cancel all running/queued training jobs in a fold.
+        
+        Args:
+            fold_path: Path to the fold directory
+            
+        Returns:
+            Dictionary with cancellation results
+        """
+        fold_path = Path(fold_path).resolve()
+        training_state = TrainingState(str(fold_path), self.base_model)
+        
+        results = {
+            'fold_name': fold_path.name,
+            'cancelled_jobs': [],
+            'failed_cancellations': [],
+            'no_action_needed': []
+        }
+        
+        print(f"=== Aborting Training Jobs for {fold_path.name} ===")
+        
+        if not training_state.epochs:
+            print("No training jobs found for this fold.")
+            return results
+        
+        for epoch, epoch_info in training_state.epochs.items():
+            if not epoch_info.job_id:
+                results['no_action_needed'].append({
+                    'epoch': epoch,
+                    'reason': 'No job ID found'
+                })
+                continue
+            
+            # Skip already terminated jobs
+            if epoch_info.status in ["completed", "failed", "cancelled"]:
+                results['no_action_needed'].append({
+                    'epoch': epoch,
+                    'job_id': epoch_info.job_id,
+                    'status': epoch_info.status,
+                    'reason': f'Job already {epoch_info.status}'
+                })
+                print(f"  Epoch {epoch}: Already {epoch_info.status} (job: {epoch_info.job_id})")
+                continue
+            
+            # Attempt to cancel running/pending jobs
+            try:
+                print(f"  Cancelling epoch {epoch} job: {epoch_info.job_id}")
+                
+                # Cancel the job through TogetherAI API
+                cancel_response = self.client.fine_tuning.cancel(epoch_info.job_id)
+                
+                # Update local state
+                training_state.update_epoch(epoch, status="cancelled")
+                
+                results['cancelled_jobs'].append({
+                    'epoch': epoch,
+                    'job_id': epoch_info.job_id,
+                    'previous_status': epoch_info.status
+                })
+                
+                print(f"    ✓ Successfully cancelled job {epoch_info.job_id}")
+                
+            except Exception as e:
+                error_msg = str(e)
+                results['failed_cancellations'].append({
+                    'epoch': epoch,
+                    'job_id': epoch_info.job_id,
+                    'error': error_msg
+                })
+                
+                print(f"    ✗ Failed to cancel job {epoch_info.job_id}: {error_msg}")
+                
+                # Don't update local state if cancellation failed
+        
+        # Print summary
+        print(f"\n=== Cancellation Summary ===")
+        print(f"Successfully cancelled: {len(results['cancelled_jobs'])} jobs")
+        print(f"Failed to cancel: {len(results['failed_cancellations'])} jobs")
+        print(f"No action needed: {len(results['no_action_needed'])} jobs")
+        
+        if results['cancelled_jobs']:
+            print(f"\nCancelled jobs:")
+            for job in results['cancelled_jobs']:
+                print(f"  Epoch {job['epoch']}: {job['job_id']}")
+        
+        if results['failed_cancellations']:
+            print(f"\nFailed cancellations:")
+            for job in results['failed_cancellations']:
+                print(f"  Epoch {job['epoch']}: {job['job_id']} - {job['error']}")
+        
+        return results

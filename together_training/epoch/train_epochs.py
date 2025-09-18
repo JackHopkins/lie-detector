@@ -20,6 +20,9 @@ Examples:
     
     # Clean up failed epochs
     python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120b/games --cleanup
+    
+    # Cancel all running/queued jobs
+    python -m together_training.epoch.train_epochs .together-120b/openai/gpt_oss_120b/games --abort
 """
 
 import argparse
@@ -29,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from .epoch_trainer import EpochTrainer
+from .endpoint_manager import EndpointManager
 
 
 def get_api_key() -> str:
@@ -78,6 +82,94 @@ def print_deployment_info(deploy_info: dict) -> None:
             print(f"    Description: {info['description']}")
 
 
+def print_endpoint_status(status_summary: dict) -> None:
+    """Print endpoint status summary."""
+    print(f"\n=== Endpoint Status for {status_summary['fold_path']} ===")
+    print(f"Total endpoints: {status_summary['total_endpoints']}")
+    
+    if status_summary['endpoints_by_state']:
+        print(f"\nEndpoints by state:")
+        for state, count in status_summary['endpoints_by_state'].items():
+            print(f"  {state}: {count}")
+    
+    if status_summary['endpoints']:
+        print(f"\nEndpoint details:")
+        for epoch, endpoint_data in status_summary['endpoints'].items():
+            status_emoji = "✓" if endpoint_data['state'] == "STARTED" else "✗" if endpoint_data['state'] in ["ERROR", "STOPPED"] else "⏳"
+            expired_text = " (EXPIRED)" if endpoint_data.get('is_expired', False) else ""
+            print(f"  Epoch {epoch}: {status_emoji} {endpoint_data['endpoint_name']} [{endpoint_data['state']}]{expired_text}")
+            print(f"    Model: {endpoint_data['model_id']}")
+            print(f"    Endpoint ID: {endpoint_data['endpoint_id']}")
+
+
+def handle_eval_setup(fold_path: str, api_key: str, fold_name: str) -> None:
+    """Discover and populate evaluation endpoints for completed models."""
+    
+    # Initialize endpoint manager
+    endpoint_manager = EndpointManager(api_key)
+    
+    try:
+        discovery_results = endpoint_manager.discover_and_populate_endpoints(fold_path, fold_name)
+        
+        if discovery_results['discovered_endpoints'] > 0:
+            print(f"\n✓ Successfully discovered and cached {discovery_results['discovered_endpoints']} endpoints")
+            print(f"Endpoints saved to: {fold_path}/eval.json")
+        
+        if discovery_results['missing_endpoints'] > 0:
+            print(f"\n⚠ {discovery_results['missing_endpoints']} models have no active endpoints:")
+            for epoch, info in discovery_results['endpoints'].items():
+                if info['status'] == 'missing':
+                    print(f"  - Epoch {epoch}: {info['model_id']}")
+            print("\nYou may need to create endpoints for these models manually.")
+        
+        if discovery_results['discovered_endpoints'] == 0 and discovery_results['missing_endpoints'] == 0:
+            print("No completed models found to discover endpoints for.")
+            
+    except Exception as e:
+        print(f"Error during endpoint discovery: {e}")
+        sys.exit(1)
+
+
+def handle_eval_cleanup(fold_path: str, api_key: str) -> None:
+    """Clean up expired evaluation endpoints."""
+    print(f"=== Cleaning up expired endpoints ===")
+    
+    endpoint_manager = EndpointManager(api_key)
+    
+    try:
+        cleanup_results = endpoint_manager.cleanup_expired_endpoints(fold_path)
+        
+        print(f"Total expired endpoints found: {cleanup_results['total_expired']}")
+        print(f"Successfully cleaned up: {len(cleanup_results['cleaned_up'])}")
+        print(f"Failed to clean up: {len(cleanup_results['failed_cleanup'])}")
+        
+        if cleanup_results['cleaned_up']:
+            print(f"\nCleaned up endpoints:")
+            for item in cleanup_results['cleaned_up']:
+                print(f"  Epoch {item['epoch']}: {item['endpoint_id']}")
+        
+        if cleanup_results['failed_cleanup']:
+            print(f"\nFailed to clean up:")
+            for item in cleanup_results['failed_cleanup']:
+                print(f"  Epoch {item['epoch']}: {item['endpoint_id']} - {item['error']}")
+                
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+        sys.exit(1)
+
+
+def handle_eval_status(fold_path: str, api_key: str) -> None:
+    """Show evaluation endpoint status."""
+    endpoint_manager = EndpointManager(api_key)
+    
+    try:
+        status_summary = endpoint_manager.get_endpoint_status_summary(fold_path)
+        print_endpoint_status(status_summary)
+    except Exception as e:
+        print(f"Error getting endpoint status: {e}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Epoch-by-Epoch TogetherAI Training System",
@@ -108,8 +200,8 @@ def main():
     parser.add_argument(
         '--learning-rate',
         type=float,
-        default=3e-5,
-        help='Learning rate for training (default: 1e-5)'
+        default=1e-4,
+        help='Learning rate for training (default: 1e-4)'
     )
     
     # Workflow options
@@ -157,6 +249,31 @@ def main():
         help='Show deployment information for completed models'
     )
     
+    parser.add_argument(
+        '--abort',
+        action='store_true',
+        help='Cancel all running/queued training jobs in the fold'
+    )
+    
+    # Endpoint management options
+    parser.add_argument(
+        '--eval-setup',
+        action='store_true',
+        help='Discover and cache existing evaluation endpoints for completed models'
+    )
+    
+    parser.add_argument(
+        '--eval-cleanup',
+        action='store_true',
+        help='Remove inactive evaluation endpoints'
+    )
+    
+    parser.add_argument(
+        '--eval-status',
+        action='store_true',
+        help='Show endpoint status for all epochs'
+    )
+    
     # Optional API keys and logging
     parser.add_argument(
         '--wandb-api-key',
@@ -166,7 +283,7 @@ def main():
     parser.add_argument(
         '--wandb-project-name',
         default='lie-detection-folds-harmony',
-        help='Weights & Biases project name (default: lie-detection-megafolds-harmony)'
+        help='Weights & Biases project base name (default: lie-detection-folds-harmony, fold name will be appended)'
     )
     
     args = parser.parse_args()
@@ -228,6 +345,31 @@ def main():
         if args.deploy_info:
             deploy_info = trainer.deploy_epoch_models(str(fold_path))
             print_deployment_info(deploy_info)
+            return
+        
+        # Handle abort
+        if args.abort:
+            abort_result = trainer.abort_fold_training(str(fold_path))
+            if abort_result['cancelled_jobs'] or abort_result['failed_cancellations']:
+                print("\nAbort operation completed.")
+                if abort_result['failed_cancellations']:
+                    print("Some jobs could not be cancelled. Check the errors above.")
+                    sys.exit(1)
+            else:
+                print("No active training jobs found to cancel.")
+            return
+        
+        # Handle endpoint management
+        if args.eval_setup:
+            handle_eval_setup(str(fold_path), api_key, fold_path.name)
+            return
+        
+        if args.eval_cleanup:
+            handle_eval_cleanup(str(fold_path), api_key)
+            return
+        
+        if args.eval_status:
+            handle_eval_status(str(fold_path), api_key)
             return
         
         # Handle training workflows
