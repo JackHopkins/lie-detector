@@ -217,9 +217,24 @@ class HarmonyConverter:
 
         # IMPORTANT: Mask ALL tokens except the very last one
         # We only want to train on the final token (A or B)
-        for i in range(len(labels)):
-            if i < len(labels)+final_answer_index:
-                labels[i] = -100
+        # for i in range(len(labels)):
+        #     if i < len(labels)+final_answer_index:
+        #         labels[i] = -100
+
+        # Find the position of just 'A' or 'B'
+        # Looking at your sample, it should be right before <|end|>
+        answer_position = None
+        for i in range(len(tokens) - 1, max(0, len(tokens) - 10), -1):
+            decoded = self.tokenizer.decode([tokens[i]])
+            if decoded.strip() in ['A', 'B']:
+                answer_position = i
+                logger.info(f"Found answer '{decoded}' at position {i}")
+                break
+
+        # Create labels - mask EVERYTHING except the single answer token
+        labels = [-100] * len(tokens)
+        if answer_position is not None:
+            labels[answer_position] = tokens[answer_position]
 
         #logger.info("Labels: "+str(labels))
 

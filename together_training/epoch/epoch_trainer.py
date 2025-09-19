@@ -416,8 +416,8 @@ class EpochTrainer:
         """Create a TogetherAI fine-tuning job for one epoch."""
         suffix = f"lie-{fold_name}-epoch{epoch_num}-{int(time.time())}"
         
-        # Calculate learning rate with 33% decay per epoch
-        current_learning_rate = self.learning_rate * (0.67 ** epoch_num)
+        # Calculate learning rate with 15% decay per epoch
+        current_learning_rate = self.learning_rate * (0.85 ** epoch_num)
         
         job_params = {
             'training_file': train_file_id,

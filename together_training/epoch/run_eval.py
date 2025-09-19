@@ -99,7 +99,7 @@ async def evaluate_model_on_fold(
             task,
             model=model_string,
             temperature=0.0,  # Deterministic for evaluation
-            log_dir=f"../../logs/eval-18-9-6/{trained_fold}/{log_dir_suffix}",
+            log_dir=f"../../logs/eval-19-9-1/{trained_fold}/{log_dir_suffix}",
         )
 
         # Extract scores
@@ -697,7 +697,7 @@ async def main():
     parser.add_argument(
         "--fold-name",
         type=str,
-        default="games",
+        default="mask-factual",
         #default="games",
         help="Training fold name (e.g., sandbagging_ascii)"
     )
@@ -720,7 +720,7 @@ async def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=200,
+        default=50,
         help="Limit number of samples per evaluation (for testing)"
     )
     parser.add_argument(
