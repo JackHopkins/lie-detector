@@ -10,7 +10,7 @@ This module manages dedicated endpoints for model evaluation, including:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple, Any
 
 
 @dataclass
@@ -192,7 +192,7 @@ from together import Together
 
 
 class EndpointManager:
-    """Enhanced EndpointManager with endpoint creation capabilities."""
+    """Enhanced EndpointManager with batch deployment capabilities."""
 
     def __init__(self, api_key: str, default_hardware: str = "4x_nvidia_h100_80gb_sxm"):
         """
@@ -580,21 +580,289 @@ class EndpointManager:
 
         return summary
 
+    def batch_deploy_all_epochs(
+            self,
+            fold_path: str,
+            fold_name: str,
+            inactive_timeout: int = 120,  # 2 hours default
+            max_concurrent: int = 5,
+            wait_for_ready: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Deploy ALL epoch endpoints simultaneously for a fold.
+        
+        Args:
+            fold_path: Path to the fold directory
+            fold_name: Name of the fold (e.g., 'mask-factual')
+            inactive_timeout: Minutes before endpoints auto-stop (default 2 hours)
+            max_concurrent: Maximum concurrent endpoint creations
+            wait_for_ready: Whether to wait for all endpoints to be ready
+            
+        Returns:
+            Summary of deployment results with endpoint names
+        """
+        from .training_state import TrainingState
+        
+        print(f"\n{'=' * 60}")
+        print(f"BATCH DEPLOYING ALL ENDPOINTS FOR {fold_name.upper()}")
+        print(f"{'=' * 60}")
+        print(f"Timeout: {inactive_timeout} minutes ({inactive_timeout/60:.1f} hours)")
+        
+        # Get all completed models from training state
+        training_state = TrainingState(fold_path, "")
+        completed_models = training_state.get_all_models()
+        
+        if not completed_models:
+            print("❌ No completed models found in training.json")
+            return {"status": "failed", "reason": "no_models", "endpoints": {}}
+        
+        print(f"Found {len(completed_models)} completed models:")
+        for epoch, model_id in sorted(completed_models.items()):
+            print(f"  📦 Epoch {epoch}: {model_id}")
+        
+        # Check existing endpoints and determine what needs to be created
+        eval_state = EvaluationState(fold_path, list(completed_models.values())[0].split('/')[0])
+        existing_endpoints = {}
+        endpoints_to_create = {}
+        
+        print(f"\n🔍 Checking existing endpoints...")
+        for epoch, model_id in completed_models.items():
+            endpoint_info = eval_state.get_endpoint_info(epoch)
+            
+            if endpoint_info:
+                # Check if endpoint is still active
+                status = self._check_endpoint_status(endpoint_info.endpoint_id)
+                if status == "STARTED":
+                    print(f"  ✅ Epoch {epoch}: Active endpoint found ({endpoint_info.endpoint_name})")
+                    existing_endpoints[epoch] = endpoint_info.endpoint_name
+                    # Update last used time
+                    eval_state.update_endpoint_state(epoch, "STARTED")
+                elif status in ["PENDING", "STARTING"]:
+                    print(f"  ⏳ Epoch {epoch}: Starting endpoint found ({endpoint_info.endpoint_name})")
+                    existing_endpoints[epoch] = endpoint_info.endpoint_name
+                else:
+                    print(f"  ❌ Epoch {epoch}: Cached endpoint not active (status: {status})")
+                    endpoints_to_create[epoch] = model_id
+            else:
+                # Try discovering existing endpoints
+                discovered = self._discover_model_endpoint(model_id)
+                if discovered and discovered['state'] in ["STARTED", "PENDING", "STARTING"]:
+                    print(f"  🔍 Epoch {epoch}: Discovered active endpoint ({discovered['name']})")
+                    existing_endpoints[epoch] = discovered['name']
+                    # Cache the discovered endpoint
+                    eval_state.add_endpoint(
+                        epoch=epoch,
+                        model_id=model_id,
+                        endpoint_id=discovered['id'],
+                        endpoint_name=discovered['name'],
+                        display_name=discovered.get('display_name', discovered['name']),
+                        state=discovered['state'],
+                        hardware=self.default_hardware,
+                        inactive_timeout=inactive_timeout
+                    )
+                else:
+                    print(f"  🚀 Epoch {epoch}: Need to create endpoint")
+                    endpoints_to_create[epoch] = model_id
+        
+        # Create missing endpoints in parallel
+        created_endpoints = {}
+        failed_endpoints = {}
+        
+        if endpoints_to_create:
+            print(f"\n🚀 Creating {len(endpoints_to_create)} new endpoints...")
+            created_endpoints, failed_endpoints = self._batch_create_endpoints(
+                endpoints_to_create,
+                fold_name,
+                inactive_timeout,
+                max_concurrent
+            )
+            
+            # Save created endpoints to eval.json
+            for epoch, endpoint_info in created_endpoints.items():
+                eval_state.add_endpoint(
+                    epoch=epoch,
+                    model_id=endpoints_to_create[epoch],
+                    endpoint_id=endpoint_info['id'],
+                    endpoint_name=endpoint_info['name'],
+                    display_name=endpoint_info['display_name'],
+                    state=endpoint_info['state'],
+                    hardware=self.default_hardware,
+                    inactive_timeout=inactive_timeout
+                )
+        
+        # Wait for all endpoints to be ready if requested
+        all_endpoints = {**existing_endpoints}
+        for epoch, endpoint_info in created_endpoints.items():
+            all_endpoints[epoch] = endpoint_info['name']
+        
+        if wait_for_ready and (created_endpoints or existing_endpoints):
+            print(f"\n⏳ Waiting for all endpoints to be ready...")
+            self._wait_for_multiple_endpoints(all_endpoints, eval_state, max_wait=900)
+        
+        # Summary
+        total_epochs = len(completed_models)
+        ready_endpoints = len(existing_endpoints) + len(created_endpoints)
+        
+        print(f"\n{'=' * 60}")
+        print(f"BATCH DEPLOYMENT SUMMARY")
+        print(f"{'=' * 60}")
+        print(f"✅ Ready endpoints: {ready_endpoints}/{total_epochs}")
+        print(f"🔄 Already existed: {len(existing_endpoints)}")
+        print(f"🚀 Newly created: {len(created_endpoints)}")
+        print(f"❌ Failed: {len(failed_endpoints)}")
+        
+        if all_endpoints:
+            print(f"\n📋 Available endpoints:")
+            for epoch in sorted(all_endpoints.keys()):
+                print(f"  Epoch {epoch}: {all_endpoints[epoch]}")
+        
+        return {
+            "status": "success" if ready_endpoints == total_epochs else "partial",
+            "total_epochs": total_epochs,
+            "ready_endpoints": ready_endpoints,
+            "existing": len(existing_endpoints),
+            "created": len(created_endpoints),
+            "failed": len(failed_endpoints),
+            "endpoints": all_endpoints,
+            "failed_epochs": list(failed_endpoints.keys()),
+            "timeout_minutes": inactive_timeout
+        }
+    
+    def _batch_create_endpoints(
+            self,
+            endpoints_to_create: Dict[int, str],
+            fold_name: str,
+            inactive_timeout: int,
+            max_concurrent: int
+    ) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, str]]:
+        """Create multiple endpoints in parallel."""
+        import concurrent.futures
+        import threading
+        
+        created_endpoints = {}
+        failed_endpoints = {}
+        create_lock = threading.Lock()
+        
+        def create_single_endpoint(epoch_model_pair):
+            epoch, model_id = epoch_model_pair
+            try:
+                print(f"    🚀 Creating endpoint for epoch {epoch}...")
+                endpoint_info = self._create_endpoint(
+                    model_id=model_id,
+                    display_name=f"{fold_name}-epoch{epoch}",
+                    inactive_timeout=inactive_timeout
+                )
+                
+                with create_lock:
+                    if endpoint_info:
+                        created_endpoints[epoch] = endpoint_info
+                        print(f"    ✅ Epoch {epoch}: Created {endpoint_info['name']}")
+                    else:
+                        failed_endpoints[epoch] = "Creation failed"
+                        print(f"    ❌ Epoch {epoch}: Failed to create endpoint")
+                        
+            except Exception as e:
+                with create_lock:
+                    failed_endpoints[epoch] = str(e)
+                    print(f"    ❌ Epoch {epoch}: Exception during creation: {e}")
+        
+        # Create endpoints in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = [
+                executor.submit(create_single_endpoint, (epoch, model_id))
+                for epoch, model_id in endpoints_to_create.items()
+            ]
+            concurrent.futures.wait(futures)
+        
+        return created_endpoints, failed_endpoints
+    
+    def _wait_for_multiple_endpoints(
+            self,
+            endpoints: Dict[int, str],
+            eval_state: 'EvaluationState',
+            max_wait: int = 900,
+            check_interval: int = 15
+    ) -> Dict[int, bool]:
+        """Wait for multiple endpoints to become ready."""
+        start_time = time.time()
+        ready_endpoints = {}
+        
+        # Get endpoint IDs from eval state
+        endpoint_ids = {}
+        for epoch, endpoint_name in endpoints.items():
+            endpoint_info = eval_state.get_endpoint_info(epoch)
+            if endpoint_info:
+                endpoint_ids[epoch] = endpoint_info.endpoint_id
+        
+        while time.time() - start_time < max_wait:
+            all_ready = True
+            
+            for epoch, endpoint_id in endpoint_ids.items():
+                if epoch in ready_endpoints:
+                    continue
+                    
+                status = self._check_endpoint_status(endpoint_id)
+                if status == "STARTED":
+                    ready_endpoints[epoch] = True
+                    eval_state.update_endpoint_state(epoch, "STARTED")
+                    print(f"    ✅ Epoch {epoch} endpoint is ready!")
+                elif status in ["ERROR", "FAILED"]:
+                    ready_endpoints[epoch] = False
+                    print(f"    ❌ Epoch {epoch} endpoint failed (status: {status})")
+                else:
+                    all_ready = False
+            
+            if all_ready or len(ready_endpoints) == len(endpoints):
+                break
+                
+            if time.time() - start_time < max_wait:
+                remaining = len(endpoints) - len(ready_endpoints)
+                elapsed = int(time.time() - start_time)
+                print(f"    ⏳ Waiting for {remaining} endpoints... ({elapsed}s elapsed)")
+                time.sleep(check_interval)
+        
+        return ready_endpoints
+
     def get_or_find_endpoint(self, fold_path: str, epoch: int, model_id: str,
                              fold_name: str) -> Optional[str]:
         """
-        Backwards compatible method that tries to find or create an endpoint.
-
-        This method maintains compatibility with the existing code while
-        adding the ability to create endpoints if they don't exist.
+        Backwards compatible method that tries to find an existing endpoint.
+        
+        NOTE: This now only finds existing endpoints - does not create new ones.
+        Use batch_deploy_all_epochs() before calling evaluation to ensure endpoints exist.
         """
-        return self.find_or_create_endpoint_for_epoch(
-            fold_path=fold_path,
-            epoch=epoch,
-            fold_name=fold_name,
-            create_if_missing=True,
-            inactive_timeout=360  # 6 hours default
-        )
+        from .epoch_eval import EvaluationState
+        
+        # Check eval.json for cached endpoint
+        eval_state = EvaluationState(fold_path, model_id.split('/')[0])
+        endpoint_info = eval_state.get_endpoint_info(epoch)
+        
+        if endpoint_info:
+            # Check if endpoint is still active
+            status = self._check_endpoint_status(endpoint_info.endpoint_id)
+            if status == "STARTED":
+                eval_state.update_endpoint_state(epoch, "STARTED")
+                return endpoint_info.endpoint_name
+            elif status in ["PENDING", "STARTING"]:
+                return endpoint_info.endpoint_name
+        
+        # Try to discover existing endpoint
+        discovered = self._discover_model_endpoint(model_id)
+        if discovered:
+            eval_state.add_endpoint(
+                epoch=epoch,
+                model_id=model_id,
+                endpoint_id=discovered['id'],
+                endpoint_name=discovered['name'],
+                display_name=discovered.get('display_name', discovered['name']),
+                state=discovered['state'],
+                hardware=self.default_hardware,
+                inactive_timeout=120  # 2 hours default
+            )
+            return discovered['name']
+        
+        # No endpoint found
+        return None
 
 
 # Utility function for standalone endpoint creation

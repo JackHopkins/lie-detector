@@ -17,26 +17,32 @@ Usage:
         --fold-name sandbagging_ascii \
         --model-name gpt_oss_120b
 """
+import asyncio
+import hashlib
+import json
 import os
 import sys
-import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-import asyncio
-import numpy as np
+
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from collections import defaultdict
+from dotenv import load_dotenv
+
+from together_training.epoch.log_cache_manager import CacheSearchCriteria, convert_cached_result_to_evaluation_metrics
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import Inspect AI components
-from inspect_ai import Task, eval, eval_async
+from inspect_ai import Task, eval_async
 from inspect_ai.dataset import MemoryDataset, Sample
-from inspect_ai.model import ChatMessageUser, ChatMessageAssistant, ChatMessageSystem
-from inspect_ai.scorer import Score, accuracy
-from inspect_ai.solver import TaskState, Generate
 
 
-async def evaluate_model_on_fold(
+#from together_training.epoch.epoch_eval import chat_binary_classification_scorer
+
+
+async def evaluate_model_on_fold_single(
         model_ref: str,
         eval_samples: List[Sample],
         fold_name: str,
@@ -44,7 +50,9 @@ async def evaluate_model_on_fold(
         trained_fold: str,
         limit: Optional[int] = None,
         is_endpoint: bool = False,
-        is_baseline: bool = False
+        is_baseline: bool = False,
+        log_dir: Optional[str] = None,
+        run_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evaluate a single model on a single fold.
@@ -80,7 +88,7 @@ async def evaluate_model_on_fold(
     task = Task(
         dataset=dataset,
         solver=lie_detection_solver(),
-        scorer=binary_classification_scorer(),
+        scorer=[binary_classification_scorer()], #,chat_binary_classification_scorer()],
         name=task_name
     )
 
@@ -94,12 +102,25 @@ async def evaluate_model_on_fold(
         ref_type = "baseline model" if is_baseline else ("endpoint" if is_endpoint else "model ID")
         print(f"    Using {ref_type}: {model_ref}")
 
-        log_dir_suffix = "baseline" if is_baseline else f"{fold_name}"
+        # Use provided log_dir or generate default format
+        if log_dir:
+            eval_log_dir = log_dir
+        else:
+            from datetime import datetime
+            date_str = datetime.now().strftime("%d-%m")
+            # Use run_id if provided, otherwise fall back to default version
+            version = run_id if run_id else "v2"
+            log_dir_suffix = "baseline" if is_baseline else f"{fold_name}"
+            eval_log_dir = f"../../logs/{date_str}/{version}/{trained_fold}/{log_dir_suffix}"
+        
         log = await eval_async(
             task,
             model=model_string,
             temperature=0.0,  # Deterministic for evaluation
-            log_dir=f"../../logs/eval-19-9-1/{trained_fold}/{log_dir_suffix}",
+            log_dir=eval_log_dir,
+            max_tasks=5,
+            max_connections=20,
+            fail_on_error=0.3
         )
 
         # Extract scores
@@ -128,6 +149,279 @@ async def evaluate_model_on_fold(
             'fold_name': fold_name,
             'epoch': epoch
         }
+
+
+async def evaluate_model_on_all_folds_parallel(
+        model_ref: str,
+        eval_folds: List,
+        epoch: int,
+        trained_fold: str,
+        limit: Optional[int] = None,
+        is_endpoint: bool = False,
+        is_baseline: bool = False,
+        log_dir: Optional[str] = None,
+        cache_manager: Optional = None,
+        cache_only: bool = False,
+        run_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Evaluate a single model on all folds in parallel using Inspect's parallel task execution.
+
+    Args:
+        model_ref: Together AI model ID or endpoint name
+        eval_folds: List of evaluation folds
+        epoch: Model epoch number (0 for baseline)
+        trained_fold: Name of the training fold
+        limit: Optional limit on number of samples
+        is_endpoint: Whether model_ref is an endpoint name
+        is_baseline: Whether this is a baseline evaluation
+
+    Returns:
+        Dictionary with evaluation results for all folds
+    """
+    from together_training.epoch.epoch_eval import (
+        lie_detection_solver,
+        binary_classification_scorer,
+        compute_metrics,
+        load_jsonl_samples,
+        prepare_eval_sample
+    )
+
+    print(f"🚀 Running parallel evaluation for {'baseline' if is_baseline else f'epoch {epoch}'} on {len(eval_folds)} folds")
+
+    # Check cache first if cache manager is available
+    cached_results = {}
+    folds_to_evaluate = []
+    
+    if cache_manager:
+        print(f"🗂️  Checking cache for existing evaluations...")
+        
+        # Determine epoch string for cache lookup
+        if is_baseline:
+            epoch_str = "baseline"
+        else:
+            epoch_str = f"epoch_{epoch}"
+        
+        # Check cache for each fold
+        for eval_fold in eval_folds:
+            criteria = CacheSearchCriteria(
+                trained_fold=trained_fold,
+                eval_fold=eval_fold.name,
+                epoch=epoch_str
+            )
+            
+            cached_result = cache_manager.find_cached_evaluation(criteria)
+            if cached_result:
+                # Convert cached result to expected format
+                metrics = convert_cached_result_to_evaluation_metrics(cached_result)
+                cached_results[eval_fold.name] = metrics
+                print(f"  💾 {eval_fold.name}: Found cached results (F1={metrics['f1']:.3f})")
+            else:
+                folds_to_evaluate.append(eval_fold)
+                print(f"  ❌ {eval_fold.name}: No cached results found")
+        
+        # If cache_only mode and some folds not cached, return error
+        if cache_only and folds_to_evaluate:
+            print(f"🚫 Cache-only mode: {len(folds_to_evaluate)} folds not cached, aborting evaluation")
+            error_results = {}
+            for fold in folds_to_evaluate:
+                error_results[fold.name] = {
+                    'error': 'No cached results available (cache-only mode)',
+                    'model_ref': model_ref,
+                    'is_endpoint': is_endpoint,
+                    'is_baseline': is_baseline,
+                    'fold_name': fold.name,
+                    'epoch': epoch
+                }
+            # Combine cached and error results
+            return {**cached_results, **error_results}
+            
+        print(f"📊 Cache summary: {len(cached_results)} cached, {len(folds_to_evaluate)} to evaluate")
+    else:
+        folds_to_evaluate = eval_folds
+        print(f"🚫 Cache disabled - evaluating all {len(folds_to_evaluate)} folds")
+
+    # If all results are cached, return them
+    if not folds_to_evaluate:
+        print(f"🎉 All results found in cache!")
+        return cached_results
+
+    # Create tasks for folds that need evaluation
+    tasks = []
+    fold_names = []
+    
+    for eval_fold in folds_to_evaluate:
+        print(f"  📋 Preparing task for fold: {eval_fold.name}")
+        
+        # Load and prepare samples for this fold
+        split = "train"
+        samples_path = eval_fold.train_path
+        
+        try:
+            raw_samples = load_jsonl_samples(samples_path)
+            print(f"    Loaded {len(raw_samples)} raw samples from {eval_fold.name}")
+            
+            # Prepare samples
+            eval_samples = []
+            for raw_sample in raw_samples:
+                try:
+                    sample = prepare_eval_sample(raw_sample)
+                    eval_samples.append(sample)
+                except Exception as e:
+                    print(f"    Warning: Failed to prepare sample: {e}")
+            
+            print(f"    Prepared {len(eval_samples)} evaluation samples for {eval_fold.name}")
+            
+            # Create dataset
+            dataset = MemoryDataset(samples=eval_samples[:limit] if limit else eval_samples)
+            
+            # Create task with appropriate name
+            if is_baseline:
+                task_name = f"baseline_eval_{eval_fold.name}"
+            else:
+                task_name = f"eval_{eval_fold.name}_epoch{epoch}"
+            
+            task = Task(
+                dataset=dataset,
+                solver=lie_detection_solver(),
+                scorer=[binary_classification_scorer()],#, chat_binary_classification_scorer()],
+                name=task_name
+            )
+            
+            tasks.append(task)
+            fold_names.append(eval_fold.name)
+            
+        except Exception as e:
+            print(f"    ❌ Error preparing fold {eval_fold.name}: {e}")
+            # Add a placeholder for this fold
+            tasks.append(None)
+            fold_names.append(eval_fold.name)
+    
+    # Filter out None tasks
+    valid_tasks = [(task, name) for task, name in zip(tasks, fold_names) if task is not None]
+    
+    if not valid_tasks:
+        print("    ❌ No valid tasks to run")
+        return {}
+    
+    print(f"  🏃‍♂️ Running {len(valid_tasks)} tasks in parallel...")
+    
+    # Run all tasks in parallel using Inspect
+    try:
+        model_string = f"together/{model_ref}"
+        ref_type = "baseline model" if is_baseline else ("endpoint" if is_endpoint else "model ID")
+        print(f"    Using {ref_type}: {model_ref}")
+        
+        # Use provided log_dir or generate default format
+        if log_dir:
+            eval_log_dir = log_dir
+        else:
+            from datetime import datetime
+            date_str = datetime.now().strftime("%d-%m")
+            # Use run_id if provided, otherwise fall back to default version
+            version = run_id if run_id else "default"
+            eval_log_dir = f"../../logs/{date_str}/{version}/{trained_fold}/epoch_{epoch if not is_baseline else 'baseline'}"
+        
+        # Run all tasks in parallel
+        logs = await eval_async(
+            [task for task, _ in valid_tasks],
+            model=model_string,
+            #model="fellows_safety/gpt-oss-120b-mask-test-all-train-c7857cd1"
+            temperature=0.0,  # Deterministic for evaluation
+            fail_on_error=0.3,
+            log_dir=eval_log_dir,
+        )
+        
+        # Process results
+        results = {}
+        
+        for i, (task, fold_name) in enumerate(valid_tasks):
+            try:
+                log = logs[i]
+                
+                # Extract scores
+                scores = []
+                for sample in log.samples:
+                    if hasattr(sample, 'scores') and 'binary_classification_scorer' in sample.scores:
+                        scores.append(sample.scores['binary_classification_scorer'])
+                
+                # Compute metrics
+                metrics = compute_metrics(scores)
+                metrics['model_ref'] = model_ref
+                metrics['is_endpoint'] = is_endpoint
+                metrics['is_baseline'] = is_baseline
+                metrics['fold_name'] = fold_name
+                metrics['epoch'] = epoch
+                
+                results[fold_name] = metrics
+                
+                print(f"    ✅ {fold_name}: F1={metrics['f1']:.3f}, Acc={metrics['accuracy']:.3f}")
+                
+            except Exception as e:
+                print(f"    ❌ Error processing results for {fold_name}: {e}")
+                results[fold_name] = {
+                    'error': str(e),
+                    'model_ref': model_ref,
+                    'is_endpoint': is_endpoint,
+                    'is_baseline': is_baseline,
+                    'fold_name': fold_name,
+                    'epoch': epoch
+                }
+        
+        print(f"  🎉 Parallel evaluation completed for {len(results)} folds")
+        
+        # Combine cached and computed results
+        final_results = {**cached_results, **results}
+        print(f"📊 Total results: {len(final_results)} folds ({len(cached_results)} cached + {len(results)} computed)")
+        return final_results
+        
+    except Exception as e:
+        print(f"    ❌ Error during parallel evaluation: {e}")
+        # Return error results for all folds
+        error_results = {}
+        for _, fold_name in valid_tasks:
+            error_results[fold_name] = {
+                'error': str(e),
+                'model_ref': model_ref,
+                'is_endpoint': is_endpoint,
+                'is_baseline': is_baseline,
+                'fold_name': fold_name,
+                'epoch': epoch
+            }
+        return error_results
+
+
+def generate_run_id_from_models(trained_models: List, baseline_model_id: Optional[str] = None) -> str:
+    """
+    Generate a run ID by hashing all model IDs used in the evaluation.
+    
+    Args:
+        trained_models: List of trained model objects with model_id attribute
+        baseline_model_id: Optional baseline model ID to include in hash
+    
+    Returns:
+        SHA-256 hash truncated to 8 characters as run ID
+    """
+    # Collect all model IDs
+    model_ids = []
+    
+    # Add baseline model if provided
+    if baseline_model_id:
+        model_ids.append(baseline_model_id)
+    
+    # Add trained model IDs
+    for model in trained_models:
+        model_ids.append(model.model_id)
+    
+    # Sort for consistent ordering
+    model_ids.sort()
+    
+    # Create hash from concatenated model IDs
+    combined_string = '|'.join(model_ids)
+    hash_obj = hashlib.sha256(combined_string.encode('utf-8'))
+    
+    # Return first 8 characters of hex digest
+    return hash_obj.hexdigest()[:8]
 
 
 def get_baseline_model_id(model_name: str) -> str:
@@ -598,10 +892,11 @@ async def run_baseline_evaluation(
         fold_name: str,
         model_name: str,
         eval_folds: List,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        force_recompute: bool = False
 ) -> Dict[str, Any]:
     """
-    Run baseline evaluation on the non-finetuned model.
+    Run baseline evaluation on the non-finetuned model with caching support.
 
     Args:
         base_path: Base directory path
@@ -609,18 +904,31 @@ async def run_baseline_evaluation(
         model_name: Model name
         eval_folds: List of evaluation folds
         limit: Optional limit on samples
+        force_recompute: Whether to force recomputation instead of using cache
 
     Returns:
         Dictionary with baseline evaluation results
     """
     from together_training.epoch.epoch_eval import (
         load_jsonl_samples,
-        prepare_eval_sample
+        prepare_eval_sample,
+        load_baseline_results,
+        save_baseline_results
     )
 
     print(f"\n{'=' * 60}")
     print(f"RUNNING BASELINE EVALUATION")
     print(f"{'=' * 60}")
+
+    # Check for cached results first (unless forced to recompute)
+    if not force_recompute:
+        print("Checking for cached baseline results...")
+        cached_results = load_baseline_results(base_path, fold_name, model_name)
+        if cached_results is not None:
+            print("✓ Found cached baseline results, skipping computation")
+            return cached_results
+        else:
+            print("No cached results found, will compute baseline evaluation")
 
     # Get baseline model ID
     baseline_model_id = get_baseline_model_id(model_name)
@@ -633,10 +941,10 @@ async def run_baseline_evaluation(
 
         # Always use train split for consistency
         split = "train"
-        samples_path = eval_fold.train_path
+        samples_path = str(eval_fold.train_path).replace("train.jsonl", "_train.jsonl")
 
         try:
-            raw_samples = load_jsonl_samples(samples_path)
+            raw_samples = load_jsonl_samples(Path(samples_path))
             print(f"    Loaded {len(raw_samples)} raw samples")
 
             # Prepare samples
@@ -651,7 +959,7 @@ async def run_baseline_evaluation(
             print(f"    Prepared {len(eval_samples)} evaluation samples")
 
             # Run evaluation
-            metrics = await evaluate_model_on_fold(
+            metrics = await evaluate_model_on_fold_single(
                 model_ref=baseline_model_id,
                 eval_samples=eval_samples,
                 fold_name=eval_fold.name,
@@ -659,7 +967,8 @@ async def run_baseline_evaluation(
                 trained_fold=fold_name,
                 limit=limit,
                 is_endpoint=False,
-                is_baseline=True
+                is_baseline=True,
+                run_id=None  # No run_id available for baseline evaluation
             )
 
             # Store results
@@ -679,6 +988,14 @@ async def run_baseline_evaluation(
         except Exception as e:
             print(f"    Error loading/evaluating: {e}")
             baseline_results[eval_fold.name] = {'error': str(e)}
+
+    # Save results to cache if computation was successful
+    if baseline_results:
+        # Check if we have any successful results (no errors)
+        successful_results = {k: v for k, v in baseline_results.items() if 'error' not in v}
+        if successful_results:
+            print(f"\n💾 Caching baseline results for future use...")
+            save_baseline_results(baseline_results, base_path, fold_name, model_name)
 
     return baseline_results
 
@@ -720,7 +1037,7 @@ async def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=50,
+        default=32,
         help="Limit number of samples per evaluation (for testing)"
     )
     parser.add_argument(
@@ -729,10 +1046,97 @@ async def main():
         default=None,
         help="Output directory for results (default: base_path/eval_results)"
     )
+    parser.add_argument(
+        "--force-recompute-baseline",
+        action="store_true",
+        help="Force recomputation of baseline results instead of using cache"
+    )
+    
+    # Run management parameters
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Use specific run ID (for resume or recompute)"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Auto-detect and resume latest incomplete run"
+    )
+    parser.add_argument(
+        "--log-base-dir",
+        type=str,
+        default="../../logs",
+        help="Base directory for logs (default: ../../logs)"
+    )
+    parser.add_argument(
+        "--force-recompute",
+        type=str,
+        default=None,
+        help="Force recompute specific epochs (comma-separated, e.g., 'epoch_0,epoch_2,baseline')"
+    )
+    parser.add_argument(
+        "--list-runs",
+        action="store_true",
+        help="List available runs and their status, then exit"
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable cache lookup and force recomputation of all evaluations"
+    )
+    parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="Only use cached results, skip any evaluations that aren't cached"
+    )
+    parser.add_argument(
+        "--show-cache-stats",
+        action="store_true",
+        help="Display cache performance statistics"
+    )
 
     args = parser.parse_args()
     args.baseline = True
-    args.render_only = None#'/Users/jackhopkins/PycharmProjects/lie-detector/eval_results/mask-factual/lie_detection_mask-factual_gpt_oss_120b_train_with_baseline.json'
+    args.render_only = False#'/Users/jackhopkins/PycharmProjects/lie-detector/eval_results_20-9-2025/lie_detection_mask-factual_gpt_oss_120b_train.json'
+    args.force_recompute = None # "epoch_4"
+    # Import run state manager and cache manager
+    from run_state_manager import RunStateManager
+    from log_cache_manager import LogCacheManager
+
+    # Initialize run state manager
+    run_manager = RunStateManager(args.log_base_dir)
+    
+    # Initialize cache manager (unless caching is disabled)
+    cache_manager = None if args.no_cache else LogCacheManager(args.log_base_dir)
+    
+    if cache_manager and not args.no_cache:
+        print(f"🗂️  Cache manager initialized (base dir: {args.log_base_dir})")
+    elif args.no_cache:
+        print(f"🚫 Caching disabled by --no-cache flag")
+    
+    # Handle list-runs command
+    if args.list_runs:
+        print(f"\n{'=' * 60}")
+        print(f"AVAILABLE EVALUATION RUNS")
+        print(f"{'=' * 60}")
+        
+        runs = run_manager.list_runs()
+        if not runs:
+            print("No evaluation runs found.")
+            return
+            
+        for run_id, run_state in runs:
+            summary = run_manager.get_run_summary(run_state)
+            status = "✅ Complete" if summary['is_complete'] else f"⏳ {summary['completion_percentage']:.1f}% complete"
+            print(f"\n{run_id}")
+            print(f"  Fold: {summary['trained_fold']} | Model: {summary['model_name']}")
+            print(f"  Created: {summary['created_time']}")
+            print(f"  Status: {status} ({summary['completed_combinations']}/{summary['total_eval_combinations']} combinations)")
+            if summary['failed_epochs'] > 0:
+                print(f"  Failed epochs: {summary['failed_epochs']}")
+        return
     if args.render_only:
         print(f"\n{'=' * 60}")
         print(f"RENDER-ONLY MODE")
@@ -796,9 +1200,7 @@ async def main():
     # Import helper functions from the main module
     from together_training.epoch.epoch_eval import (
         find_trained_models,
-        find_eval_folds,
-        load_jsonl_samples,
-        prepare_eval_sample
+        find_eval_folds
     )
     from together_training.epoch.endpoint_manager import EndpointManager
 
@@ -832,7 +1234,8 @@ async def main():
             fold_name=args.fold_name,
             model_name=args.model_name,
             eval_folds=eval_folds,
-            limit=args.limit
+            limit=args.limit,
+            force_recompute=args.force_recompute_baseline
         )
         all_results["baseline"] = baseline_results
 
@@ -857,7 +1260,18 @@ async def main():
             trained_models = []
 
         if trained_models:
-            # Initialize endpoint manager
+            # Generate run_id from all models if not provided
+            if not args.run_id:
+                baseline_model_id = None
+                if include_baseline:
+                    baseline_model_id = get_baseline_model_id(args.model_name)
+                
+                args.run_id = generate_run_id_from_models(trained_models, baseline_model_id)
+                print(f"🔗 Generated run ID from {len(trained_models)} models: {args.run_id}")
+            else:
+                print(f"🔗 Using provided run ID: {args.run_id}")
+
+            # Initialize endpoint manager and batch deploy all endpoints
             print(f"\n{'=' * 60}")
             print(f"ENDPOINT SETUP")
             print(f"{'=' * 60}")
@@ -866,9 +1280,35 @@ async def main():
             if not api_key:
                 print("Warning: TOGETHER_API_KEY not found. Will skip models without cached endpoints.")
                 endpoint_manager = None
+                batch_deploy_result = None
             else:
                 endpoint_manager = EndpointManager(api_key)
                 print("Endpoint manager initialized")
+                
+                # Define training fold path
+                training_fold_path = base_path / ".together-120b" / "openai" / args.model_name / args.fold_name
+                
+                # Batch deploy ALL endpoints for this fold with 2-hour timeout
+                print(f"\n🚀 BATCH DEPLOYING ALL ENDPOINTS FOR {args.fold_name}")
+                batch_deploy_result = endpoint_manager.batch_deploy_all_epochs(
+                    fold_path=str(training_fold_path),
+                    fold_name=args.fold_name,
+                    inactive_timeout=120,  # 2 hours
+                    max_concurrent=5,
+                    wait_for_ready=True
+                )
+                
+                if batch_deploy_result["status"] == "success":
+                    print(f"✅ All {batch_deploy_result['ready_endpoints']} endpoints deployed successfully!")
+                elif batch_deploy_result["status"] == "partial":
+                    print(f"⚠️  Partial deployment: {batch_deploy_result['ready_endpoints']}/{batch_deploy_result['total_epochs']} endpoints ready")
+                    if batch_deploy_result["failed_epochs"]:
+                        print(f"❌ Failed epochs: {batch_deploy_result['failed_epochs']}")
+                else:
+                    print(f"❌ Batch deployment failed: {batch_deploy_result.get('reason', 'unknown')}")
+                    if not batch_deploy_result.get("endpoints"):
+                        print("No endpoints available for evaluation!")
+                        endpoint_manager = None
 
             # Run evaluations
             print(f"\n{'=' * 60}")
@@ -928,57 +1368,20 @@ async def main():
                     }
                     continue
 
-                for eval_fold in eval_folds:
-                    print(f"\n  Evaluating on fold: {eval_fold.name}")
-
-                    split = "train"
-                    print(f"Using {split} split for evaluation")
-
-                    samples_path = eval_fold.train_path
-
-                    try:
-                        raw_samples = load_jsonl_samples(samples_path)
-                        print(f"    Loaded {len(raw_samples)} raw samples")
-
-                        # Prepare samples
-                        eval_samples = []
-                        for raw_sample in raw_samples:
-                            try:
-                                sample = prepare_eval_sample(raw_sample)
-                                eval_samples.append(sample)
-                            except Exception as e:
-                                print(f"    Warning: Failed to prepare sample: {e}")
-
-                        print(f"    Prepared {len(eval_samples)} evaluation samples")
-
-                        # Run evaluation
-                        metrics = await evaluate_model_on_fold(
-                            model_ref=endpoint_name,
-                            eval_samples=eval_samples,
-                            fold_name=eval_fold.name,
-                            epoch=model_info.epoch,
-                            limit=args.limit,
-                            is_endpoint=is_endpoint,
-                            trained_fold=args.fold_name
-                        )
-
-                        # Store results
-                        epoch_results[eval_fold.name] = metrics
-
-                        # Print metrics
-                        if 'error' not in metrics:
-                            print(f"    Results:")
-                            print(f"      - Accuracy:  {metrics['accuracy']:.3f}")
-                            print(f"      - F1 Score:  {metrics['f1']:.3f}")
-                            print(f"      - Precision: {metrics['precision']:.3f}")
-                            print(f"      - Recall:    {metrics['recall']:.3f}")
-                            print(f"      - Samples:   {metrics['num_samples']}")
-                        else:
-                            print(f"    Error: {metrics['error']}")
-
-                    except Exception as e:
-                        print(f"    Error loading/evaluating: {e}")
-                        epoch_results[eval_fold.name] = {'error': str(e)}
+                # Run parallel evaluation on all folds for this epoch
+                print(f"\n🚀 Running parallel evaluation on all folds for epoch {model_info.epoch}")
+                epoch_results = await evaluate_model_on_all_folds_parallel(
+                    model_ref=endpoint_name,
+                    eval_folds=eval_folds,
+                    epoch=model_info.epoch,
+                    trained_fold=args.fold_name,
+                    limit=args.limit,
+                    is_endpoint=is_endpoint,
+                    is_baseline=False,
+                    cache_manager=cache_manager,
+                    cache_only=args.cache_only,
+                    run_id=args.run_id
+                )
 
                 all_results[f"epoch_{model_info.epoch}"] = epoch_results
 

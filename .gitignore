@@ -78,3 +78,6 @@ __pycache__
 /baseline_new/results_no_metadata/
 /baseline_new/results_with_metadata/
 /baseline_new/results_with_metadatav2/
+/.together-120b-mega/
+/eval_results/
+/eval_results_20-9-2025/

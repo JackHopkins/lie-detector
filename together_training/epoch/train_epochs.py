@@ -282,7 +282,7 @@ def main():
     
     parser.add_argument(
         '--wandb-project-name',
-        default='lie-detection-folds-harmony',
+        default='lie-detection-folds-harmony-full',
         help='Weights & Biases project base name (default: lie-detection-folds-harmony, fold name will be appended)'
     )
     

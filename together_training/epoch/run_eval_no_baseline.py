@@ -25,6 +25,8 @@ from inspect_ai.model import ChatMessageUser, ChatMessageAssistant, ChatMessageS
 from inspect_ai.scorer import Score, accuracy
 from inspect_ai.solver import TaskState, Generate
 
+from together_training.epoch.epoch_eval import chat_binary_classification_scorer
+
 
 async def evaluate_model_on_fold(
         model_ref: str,
@@ -62,7 +64,7 @@ async def evaluate_model_on_fold(
     task = Task(
         dataset=dataset,
         solver=lie_detection_solver(),
-        scorer=binary_classification_scorer(),
+        scorer=[binary_classification_scorer(), chat_binary_classification_scorer()],
         name=f"eval_{fold_name}_epoch{epoch}"
     )
 

@@ -351,7 +351,7 @@ class EpochTrainer:
     def train_until_complete(self, 
                            fold_path: str,
                            max_epochs: int = 5,
-                           timeout_per_epoch: int = 60) -> Dict[str, Any]:
+                           timeout_per_epoch: int = 180) -> Dict[str, Any]:
         """
         Train all epochs sequentially until completion.
         
@@ -417,25 +417,25 @@ class EpochTrainer:
         suffix = f"lie-{fold_name}-epoch{epoch_num}-{int(time.time())}"
         
         # Calculate learning rate with 15% decay per epoch
-        current_learning_rate = self.learning_rate * (0.85 ** epoch_num)
+        current_learning_rate = self.learning_rate #* (0.85 ** epoch_num)
         
         job_params = {
             'training_file': train_file_id,
             'validation_file': val_file_id,
-            'n_epochs': 1,  # Always train for exactly 1 epoch
+            'n_epochs': 3,  # Always train for exactly 1 epoch
             'learning_rate': current_learning_rate,
             'train_on_inputs': 'auto',  # Use auto for better compatibility
             'lora': True,
             'suffix': suffix,
-            'n_evals': 2,  # Match your example (more evaluations)
+            'n_evals': 5,  # Match your example (more evaluations)
             'n_checkpoints': 1,  # Match your example (more checkpoints)
-            'warmup_ratio': 0,  # Match your example
+            'warmup_ratio': 0.1,  # Match your example
             # 'lr_scheduler_type': 'linear',
             # 'lr_scheduler_args': {
             #     'min_lr_ratio': 0.66  # End at 66% of starting learning rate
             # },
-            "lr_scheduler_type": "linear",
-            "min_lr_ratio": 0.66
+            "lr_scheduler_type": "cosine",
+            #"min_lr_ratio": 0.66
         }
         
         # Use from_checkpoint for continuing training or model for new training
@@ -686,7 +686,7 @@ class EpochTrainer:
                 })
                 
                 print(f"    ✗ Failed to cancel job {epoch_info.job_id}: {error_msg}")
-                
+
                 # Don't update local state if cancellation failed
         
         # Print summary
