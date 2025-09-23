@@ -412,6 +412,7 @@ class LieDetectionDataProcessor:
                 # All messages except the last assistant message get weight 0
                 if self.lie_prompt and i == len(merged_messages) - 1:
                     # Last message (the lie response) gets normal weight (no weight field)
+                    msg['weight'] = 1
                     weighted_messages.append(msg)
                 else:
                     # All other messages get weight 0
@@ -809,7 +810,7 @@ def verify_dataset(base_dir: Path, aggregation: str = 'task-group'):
 
 def main():
     parser = argparse.ArgumentParser(description='Prepare lie detection data for fine-tuning')
-    parser.add_argument('--model', help='Model identifier (e.g., openai/gpt-4o)', default='google/gemma-3-12b-it')
+    parser.add_argument('--model', help='Model identifier (e.g., openai/gpt-4o)', default='google/gemma-3-27b-it')
     parser.add_argument('--aggregation',
                         choices=['motivation', 'knowledge', 'task-group', 'megafolds', 'none'],
                         default='task-group', help='Aggregation strategy for categorizing tasks')
@@ -1094,6 +1095,9 @@ def main():
                 master_summary["message_processing"]["samples_with_merges"] += 1
             master_summary["message_processing"]["total_samples_processed"] += 1
 
+            #if had_merge:
+            #    continue
+
             # Always create the version with metadata
             train_with_meta = {
                 "messages": merged_messages,
@@ -1148,6 +1152,9 @@ def main():
             if had_merge:
                 master_summary["message_processing"]["samples_with_merges"] += 1
             master_summary["message_processing"]["total_samples_processed"] += 1
+
+            #if had_merge:
+            #    continue
 
             # Always create the version with metadata
             val_with_meta = {

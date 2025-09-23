@@ -212,7 +212,7 @@ class EndpointManager:
             fold_path: str,
             epoch: int,
             fold_name: str,
-            inactive_timeout: int = 360,
+            inactive_timeout: int = 30,
             create_if_missing: bool = True
     ) -> Optional[str]:
         """
@@ -229,7 +229,7 @@ class EndpointManager:
             Endpoint name if found/created, None otherwise
         """
         from .training_state import TrainingState
-        from .epoch_eval import EvaluationState
+        #from .epoch_eval import EvaluationState
 
         # Get model ID from training state
         training_state = TrainingState(fold_path, "")
@@ -344,7 +344,7 @@ class EndpointManager:
             self,
             model_id: str,
             display_name: str,
-            inactive_timeout: int = 360,
+            inactive_timeout: int = 30,
             min_replicas: int = 1,
             max_replicas: int = 1
     ) -> Optional[Dict[str, Any]]:
@@ -495,8 +495,8 @@ class EndpointManager:
         Returns:
             Summary of created endpoints
         """
-        from .training_state import TrainingState
-        from .epoch_eval import EvaluationState
+        from training_state import TrainingState
+        #from epoch_eval import EvaluationState
 
         print(f"\n{'=' * 60}")
         print(f"Creating endpoints for {fold_name}")
@@ -601,7 +601,7 @@ class EndpointManager:
         Returns:
             Summary of deployment results with endpoint names
         """
-        from .training_state import TrainingState
+        from training_state import TrainingState
         
         print(f"\n{'=' * 60}")
         print(f"BATCH DEPLOYING ALL ENDPOINTS FOR {fold_name.upper()}")
@@ -831,7 +831,7 @@ class EndpointManager:
         NOTE: This now only finds existing endpoints - does not create new ones.
         Use batch_deploy_all_epochs() before calling evaluation to ensure endpoints exist.
         """
-        from .epoch_eval import EvaluationState
+        #from epoch_eval import EvaluationState
         
         # Check eval.json for cached endpoint
         eval_state = EvaluationState(fold_path, model_id.split('/')[0])

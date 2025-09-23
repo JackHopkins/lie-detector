@@ -4,6 +4,8 @@ Todo:
 
 python -m prep.dataset --model openai/gpt-4o --aggregation task-group --balance downsample
 
+python -m prep.dataset --model google/gemma-3-26b-it --aggregation task-group --balance downsample
+
 python dataset.py --model gpt-4o --aggregation generalization_map_3 --folds true --balance downsample
 
 python -m prep.train --dataset .data/openai/gpt_4o/mask --model gpt-4o-2024-08-06 --size 128

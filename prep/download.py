@@ -675,7 +675,7 @@ if __name__ == "__main__":
     downloader = S3DataDownloader(use_majority_vote=True, cache_post_processed=True, cache_dir="../.data")
 
     # Get samples with majority vote augmentation (will use cache if fresh)
-    samples = downloader.get_model_samples("openai/gpt-oss-120b")
+    samples = downloader.get_model_samples("google/gemma-3-27b-it")
     print(f"Loaded {len(samples)} samples")
 
     # Check how many samples were augmented

@@ -6,25 +6,15 @@ computing F1, accuracy, recall, and precision metrics.
 """
 
 import json
-import math
-import os
-import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
-import numpy as np
-from dataclasses import dataclass
+from typing import Dict, List, Any, Optional
 
-from together import Together
-import math
-from .endpoint_manager import EndpointManager, EvaluationState
-
-from inspect_ai import Task, task
-from inspect_ai.dataset import Dataset, Sample, MemoryDataset
-from inspect_ai.model import ChatMessageUser, ChatMessageAssistant, ChatMessageSystem, get_model, ModelOutput
+from inspect_ai.dataset import Sample
 from inspect_ai.scorer import Score, Scorer, scorer, accuracy, mean, NOANSWER, CORRECT, INCORRECT
 from inspect_ai.solver import TaskState, Solver, solver, Generate
-from inspect_ai.log import EvalLog
+from together import Together
 
 
 # ============== Data Classes ==============
@@ -49,7 +39,7 @@ class EvalFold:
 
 # ============== Baseline Caching Functions ==============
 
-def get_baseline_cache_path(base_path: Path, fold_name: str, model_name: str) -> Path:
+def get_baseline_cache_path(base_path: Path, folder: str, fold_name: str, model_name: str) -> Path:
     """
     Get the cache directory path for baseline results.
     
@@ -61,12 +51,13 @@ def get_baseline_cache_path(base_path: Path, fold_name: str, model_name: str) ->
     Returns:
         Path to baseline cache directory
     """
-    return base_path / ".together-120b" / "openai" / model_name / fold_name / "cache"
+    return base_path / folder / model_name / fold_name / "cache"
 
 
 def save_baseline_results(
     results: Dict[str, Any], 
-    base_path: Path, 
+    base_path: Path,
+    folder: str,
     fold_name: str, 
     model_name: str
 ) -> None:
@@ -79,7 +70,7 @@ def save_baseline_results(
         fold_name: Training fold name
         model_name: Model name
     """
-    cache_dir = get_baseline_cache_path(base_path, fold_name, model_name)
+    cache_dir = get_baseline_cache_path(base_path, folder, fold_name, model_name)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     cache_file = cache_dir / "baseline_results.json"
@@ -102,7 +93,8 @@ def save_baseline_results(
 
 
 def load_baseline_results(
-    base_path: Path, 
+    base_path: Path,
+    folder: str,
     fold_name: str, 
     model_name: str
 ) -> Optional[Dict[str, Any]]:
@@ -117,7 +109,7 @@ def load_baseline_results(
     Returns:
         Cached baseline results or None if not found
     """
-    cache_dir = get_baseline_cache_path(base_path, fold_name, model_name)
+    cache_dir = get_baseline_cache_path(base_path, folder, fold_name, model_name)
     cache_file = cache_dir / "baseline_results.json"
     
     if not cache_file.exists():
@@ -150,7 +142,8 @@ def load_baseline_results(
 
 
 def clear_baseline_cache(
-    base_path: Path, 
+    base_path: Path,
+    folder: str,
     fold_name: str, 
     model_name: str
 ) -> bool:
@@ -165,7 +158,7 @@ def clear_baseline_cache(
     Returns:
         True if cache was cleared, False if no cache existed
     """
-    cache_dir = get_baseline_cache_path(base_path, fold_name, model_name)
+    cache_dir = get_baseline_cache_path(base_path, folder, fold_name, model_name)
     cache_file = cache_dir / "baseline_results.json"
     
     if cache_file.exists():
@@ -179,7 +172,7 @@ def clear_baseline_cache(
 
 # ============== Helper Functions ==============
 
-def find_trained_models(base_path: Path, fold_name: str, model_name: str) -> List[ModelInfo]:
+def find_trained_models(base_path: Path, folder: str, fold_name: str, model_name: str) -> List[ModelInfo]:
     """
     Find all trained models for a given fold and base model.
 
@@ -191,7 +184,7 @@ def find_trained_models(base_path: Path, fold_name: str, model_name: str) -> Lis
     Returns:
         List of ModelInfo objects for completed models
     """
-    training_json_path = base_path / ".together-120b" / "openai" / model_name / fold_name / "training.json"
+    training_json_path = base_path / folder / model_name / fold_name / "training.json"
 
     if not training_json_path.exists():
         raise FileNotFoundError(f"Training metadata not found at {training_json_path}")
@@ -213,7 +206,10 @@ def find_trained_models(base_path: Path, fold_name: str, model_name: str) -> Lis
     return sorted(models, key=lambda x: x.epoch)
 
 
-def find_eval_folds(base_path: Path, model_name: str, exclude_fold: Optional[str] = None) -> List[EvalFold]:
+def find_eval_folds(base_path: Path,
+                    folder: str,
+                    model_name: str,
+                    exclude_fold: Optional[str] = None) -> List[EvalFold]:
     """
     Find all folds that have train.jsonl and val.jsonl pairs.
 
@@ -225,7 +221,7 @@ def find_eval_folds(base_path: Path, model_name: str, exclude_fold: Optional[str
     Returns:
         List of EvalFold objects
     """
-    model_path = base_path / ".together-120b" / "openai" / model_name
+    model_path = base_path / folder / model_name
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model directory not found at {model_path}")
@@ -298,7 +294,7 @@ def prepare_eval_sample(sample_data: Dict[str, Any]) -> Sample:
         }
     )
 
-import math
+
 # ============== Solvers ==============
 @solver
 def lie_detection_solver() -> Solver:

@@ -28,11 +28,40 @@ Examples:
 import argparse
 import os
 import sys
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 from .epoch_trainer import EpochTrainer
 from .endpoint_manager import EndpointManager
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration in seconds to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.1f}m"
+    else:
+        hours = seconds / 3600
+        minutes = (seconds % 3600) / 60
+        return f"{hours:.1f}h {minutes:.0f}m"
+
+
+def log_timing(message: str, start_time: float = None) -> float:
+    """Log a timestamped message and return current time."""
+    current_time = time.time()
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    if start_time is not None:
+        duration = current_time - start_time
+        print(f"[{timestamp}] {message} (took {format_duration(duration)})")
+    else:
+        print(f"[{timestamp}] {message}")
+    
+    return current_time
 
 
 def get_api_key() -> str:
@@ -288,7 +317,11 @@ def main():
     
     args = parser.parse_args()
     
+    # Record script start time
+    script_start_time = log_timing(f"🚀 Training script started for {args.fold_path}")
+    
     # Validate fold path
+    init_start = time.time()
     fold_path = Path(args.fold_path).resolve()
     if not fold_path.exists():
         print(f"Error: Fold path does not exist: {fold_path}")
@@ -314,6 +347,8 @@ def main():
     api_key = get_api_key()
     
     # Initialize trainer
+    log_timing("📊 Initializing trainer and validating configuration", init_start)
+    trainer_init_start = time.time()
     trainer = EpochTrainer(
         api_key=api_key,
         base_model=args.base_model,
@@ -321,6 +356,7 @@ def main():
         wandb_api_key=args.wandb_api_key,
         wandb_project_name=args.wandb_project_name
     )
+    log_timing("✅ Trainer initialized successfully", trainer_init_start)
     
     try:
         # Handle status check
@@ -374,7 +410,7 @@ def main():
         
         # Handle training workflows
         if args.all_epochs:
-            print(f"Starting complete training: {args.max_epochs} epochs")
+            training_start = log_timing(f"🎯 Starting complete training sequence: {args.max_epochs} epochs")
             result = trainer.train_until_complete(
                 fold_path=str(fold_path),
                 max_epochs=args.max_epochs,
@@ -382,55 +418,69 @@ def main():
             )
             
             if result['status'] == 'completed':
-                print(f"\n✓ All {args.max_epochs} epochs completed successfully!")
-                print_deployment_info(trainer.deploy_epoch_models(str(fold_path)))
+                log_timing(f"🎉 All {args.max_epochs} epochs completed successfully!", training_start)
+                
+                # Time deployment info generation
+                deploy_start = time.time()
+                deploy_info = trainer.deploy_epoch_models(str(fold_path))
+                log_timing("📋 Generated deployment information", deploy_start)
+                print_deployment_info(deploy_info)
             else:
-                print(f"\n✗ Training failed: {result['message']}")
+                log_timing(f"❌ Training sequence failed: {result['message']}", training_start)
                 sys.exit(1)
         
         else:
             # Train single epoch
-            print("Training single epoch...")
+            epoch_start = log_timing("🎯 Starting single epoch training...")
             result = trainer.train_single_epoch(
                 fold_path=str(fold_path),
                 max_epochs=args.max_epochs
             )
             
             if result['status'] == 'completed':
-                print(f"\n✓ Training completed! All {args.max_epochs} epochs finished.")
-                print_deployment_info(trainer.deploy_epoch_models(str(fold_path)))
+                log_timing(f"🎉 Training completed! All {args.max_epochs} epochs finished.", epoch_start)
+                
+                # Time deployment info generation
+                deploy_start = time.time()
+                deploy_info = trainer.deploy_epoch_models(str(fold_path))
+                log_timing("📋 Generated deployment information", deploy_start)
+                print_deployment_info(deploy_info)
                 
             elif result['status'] == 'training':
-                print(f"\n✓ Epoch {result['current_epoch']} started: {result['job_id']}")
+                log_timing(f"✅ Epoch {result['current_epoch']} started successfully (Job ID: {result['job_id']})", epoch_start)
                 
                 if args.wait:
-                    print("Waiting for epoch to complete...")
+                    wait_start = log_timing(f"⏳ Waiting for epoch {result['current_epoch']} to complete (timeout: {args.timeout}m)...")
                     monitor_result = trainer.monitor_and_wait(str(fold_path), args.timeout)
                     
                     if monitor_result['status'] == 'completed':
-                        print(f"\n✓ Epoch {monitor_result['epoch']} completed!")
-                        print(f"Model ID: {monitor_result['model_id']}")
+                        log_timing(f"🎉 Epoch {monitor_result['epoch']} completed! Model ID: {monitor_result['model_id']}", wait_start)
                         
                         # Show status after completion
+                        status_start = time.time()
                         status_info = trainer.get_fold_status(str(fold_path))
+                        log_timing("📊 Retrieved updated status", status_start)
                         print_status(status_info)
                     else:
-                        print(f"\n✗ Epoch failed: {monitor_result['message']}")
+                        log_timing(f"❌ Epoch {monitor_result.get('epoch', 'unknown')} failed: {monitor_result['message']}", wait_start)
                         sys.exit(1)
                 else:
                     print(f"Use --wait to monitor completion, or run with --status to check later")
                     print(f"Job ID: {result['job_id']}")
             
             elif result['status'] == 'error':
-                print(f"\n✗ Training failed: {result['message']}")
+                log_timing(f"❌ Training failed: {result['message']}", epoch_start)
                 sys.exit(1)
+        
+        # Log total script completion time
+        log_timing("🏁 Training script completed successfully", script_start_time)
     
     except KeyboardInterrupt:
-        print("\nTraining interrupted by user")
+        log_timing("🛑 Training interrupted by user", script_start_time)
         sys.exit(130)
     
     except Exception as e:
-        print(f"Error: {e}")
+        log_timing(f"💥 Script failed with error: {e}", script_start_time)
         sys.exit(1)
 
 

@@ -173,7 +173,8 @@ class EpochTrainer:
                     prev_epoch_info.status == "completed" and 
                     prev_epoch_info.job_id):
                     from_checkpoint = prev_epoch_info.job_id
-                    base_model_for_epoch = None  # Not used when from_checkpoint is set
+                    base_model_for_epoch = self.base_model
+                    # base_model_for_epoch = None  # Not used when from_checkpoint is set
                     print(f"Continuing from checkpoint (epoch {prev_epoch} job): {from_checkpoint}")
                     break
                 prev_epoch -= 1
@@ -288,13 +289,14 @@ class EpochTrainer:
                         for event in recent_events:
                             if hasattr(event, 'message'):
                                 print(f"  Event: {event.message}")
+                    check_interval = 30
                 except Exception:
                     pass  # Events are optional
                 
                 if status == "completed":
                     model_id = job_info.output_name
                     training_state.update_epoch(current_epoch, model_id, "completed")
-                    
+                    check_interval = 30
                     print(f"✓ Epoch {current_epoch} completed successfully!")
                     print(f"Model ID: {model_id}")
                     
@@ -422,7 +424,7 @@ class EpochTrainer:
         job_params = {
             'training_file': train_file_id,
             'validation_file': val_file_id,
-            'n_epochs': 3,  # Always train for exactly 1 epoch
+            'n_epochs': 1,  # Always train for exactly 1 epoch
             'learning_rate': current_learning_rate,
             'train_on_inputs': 'auto',  # Use auto for better compatibility
             'lora': True,
@@ -448,7 +450,7 @@ class EpochTrainer:
         if self.wandb_api_key:
             job_params['wandb_api_key'] = self.wandb_api_key
             # Create wandb project name with fold suffix
-            wandb_project_with_fold = self.wandb_project_name+f"-{fold_name}"
+            wandb_project_with_fold = self.wandb_project_name+f"-{fold_name}-{model.replace('/', '-')}"
             job_params['wandb_project_name'] = wandb_project_with_fold
         
         try:
@@ -464,7 +466,7 @@ class EpochTrainer:
             print(f"  N Evals: {job_params['n_evals']}")
             print(f"  N Checkpoints: {job_params['n_checkpoints']}")
             if self.wandb_api_key:
-                wandb_project_with_fold = self.wandb_project_name+f"-{fold_name}"
+                wandb_project_with_fold = self.wandb_project_name+f"-{fold_name}-{model.replace('/', '-')}"
                 print(f"  WANDB Project: {wandb_project_with_fold}")
                 print(f"  WANDB Logging: Enabled")
             else:

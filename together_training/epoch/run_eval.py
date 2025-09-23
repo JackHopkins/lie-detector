@@ -29,7 +29,7 @@ from typing import Dict, Any, List, Optional
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from together_training.epoch.log_cache_manager import CacheSearchCriteria, convert_cached_result_to_evaluation_metrics
+from log_cache_manager import CacheSearchCriteria, convert_cached_result_to_evaluation_metrics
 
 # Load environment variables from .env file
 load_dotenv()
@@ -70,7 +70,7 @@ async def evaluate_model_on_fold_single(
     Returns:
         Dictionary with evaluation metrics
     """
-    from together_training.epoch.epoch_eval import (
+    from epoch_eval import (
         lie_detection_solver,
         binary_classification_scorer,
         compute_metrics
@@ -124,18 +124,53 @@ async def evaluate_model_on_fold_single(
         )
 
         # Extract scores
+        # scores = []
+        # for sample in log[0].samples:
+        #     if hasattr(sample, 'scores') and 'binary_classification_scorer' in sample.scores:
+        #         scores.append(sample.scores['binary_classification_scorer'])
+
+        # After running evaluation, extract scores AND probabilities
         scores = []
+        probabilities = []  # Store probability of positive class (A = "I lied")
+        targets = []  # Store true labels
+
         for sample in log[0].samples:
             if hasattr(sample, 'scores') and 'binary_classification_scorer' in sample.scores:
-                scores.append(sample.scores['binary_classification_scorer'])
+                score = sample.scores['binary_classification_scorer']
+                scores.append(score)
+
+                # Extract probability from metadata
+                if hasattr(sample, 'metadata') and sample.metadata:
+                    # Get probability of class A (positive class)
+                    a_prob = sample.metadata.get('a_probability', None)
+                    if a_prob is not None:
+                        probabilities.append(a_prob)
+                        # Extract true label (1 for A, 0 for B)
+                        target = sample.metadata.get('target', '')
+                        targets.append(1 if target == 'A' else 0)
 
         # Compute metrics
         metrics = compute_metrics(scores)
+
         metrics['model_ref'] = model_ref
         metrics['is_endpoint'] = is_endpoint
         metrics['is_baseline'] = is_baseline
         metrics['fold_name'] = fold_name
         metrics['epoch'] = epoch
+
+        if probabilities and targets:
+            from sklearn.metrics import roc_auc_score, roc_curve
+            auroc = roc_auc_score(targets, probabilities)
+            fpr, tpr, thresholds = roc_curve(targets, probabilities)
+
+            metrics['auroc'] = auroc
+            metrics['roc_curve'] = {
+                'fpr': fpr.tolist(),
+                'tpr': tpr.tolist(),
+                'thresholds': thresholds.tolist()
+            }
+            metrics['probabilities'] = probabilities
+            metrics['true_labels'] = targets
 
         return metrics
 
@@ -179,7 +214,7 @@ async def evaluate_model_on_all_folds_parallel(
     Returns:
         Dictionary with evaluation results for all folds
     """
-    from together_training.epoch.epoch_eval import (
+    from epoch_eval import (
         lie_detection_solver,
         binary_classification_scorer,
         compute_metrics,
@@ -215,7 +250,7 @@ async def evaluate_model_on_all_folds_parallel(
                 # Convert cached result to expected format
                 metrics = convert_cached_result_to_evaluation_metrics(cached_result)
                 cached_results[eval_fold.name] = metrics
-                print(f"  💾 {eval_fold.name}: Found cached results (F1={metrics['f1']:.3f})")
+                print(f"  💾 {eval_fold.name}: Found cached results ({str(metrics)})")
             else:
                 folds_to_evaluate.append(eval_fold)
                 print(f"  ❌ {eval_fold.name}: No cached results found")
@@ -436,7 +471,9 @@ def get_baseline_model_id(model_name: str) -> str:
     """
     # Map internal model names to Together AI model IDs
     model_mapping = {
-        'gpt_oss_120b': "openai/gpt-oss-120b"#'meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo',  # Update this with correct model ID
+        'openai_gpt_oss_120b': "openai/gpt-oss-120b",#'meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo',  # Update this with correct model ID
+        'google_gemma_3_27b_it': "google/gemma-3-27b-it",
+        'google/gemma_3_27b_it': "google/gemma-3-27b-it"
         # Add other model mappings as needed
     }
 
@@ -447,6 +484,223 @@ def get_baseline_model_id(model_name: str) -> str:
     # You may need to adjust this based on Together AI's model naming
     return model_name
 
+
+def generate_auroc_charts(
+        all_results: Dict[str, Any],
+        trained_fold: str,
+        output_dir: Path,
+        split: str,
+        model_name: str,
+        include_baseline: bool = False
+) -> None:
+    """
+    Generate AUROC charts showing ROC curves across epochs.
+
+    Args:
+        all_results: Dictionary with evaluation results by epoch
+        trained_fold: Name of the fold used for training
+        output_dir: Directory to save charts
+        split: Train or val split being evaluated
+        model_name: Name of the model
+        include_baseline: Whether to include baseline in charts
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import auc
+
+    # Create figure for ROC curves
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    axes = axes.flatten()
+
+    # Colors for different epochs
+    colors = plt.cm.viridis(np.linspace(0, 1, len(all_results)))
+
+    # Track AUROC values across epochs for summary plot
+    auroc_by_epoch = defaultdict(lambda: defaultdict(float))
+
+    # Process each epoch
+    for idx, (epoch_key, epoch_results) in enumerate(all_results.items()):
+        if 'skipped' in epoch_results or 'error' in epoch_results:
+            continue
+
+        # Extract epoch number
+        try:
+            if epoch_key == "baseline":
+                epoch_num = -1
+            else:
+                epoch_num = int(epoch_key.split('_')[1])
+        except (ValueError, IndexError):
+            continue
+
+        color = colors[idx]
+
+        # Plot ROC curve for trained fold
+        if trained_fold in epoch_results:
+            metrics = epoch_results[trained_fold]
+            if 'roc_curve' in metrics and 'auroc' in metrics:
+                fpr = metrics['roc_curve']['fpr']
+                tpr = metrics['roc_curve']['tpr']
+                auroc_val = metrics['auroc']
+
+                auroc_by_epoch[epoch_num][trained_fold] = auroc_val
+
+                # Plot on first subplot (trained fold)
+                label = f"Epoch {epoch_num} (AUC={auroc_val:.3f})"
+                if epoch_num == -1:
+                    label = f"Baseline (AUC={auroc_val:.3f})"
+
+                axes[0].plot(fpr, tpr, color=color, lw=2,
+                             label=label, linestyle='--' if epoch_num != -1 else ':')
+
+        # Calculate mean ROC curve for other folds
+        other_fprs = []
+        other_tprs = []
+        other_aurocs = []
+
+        for fold_name, metrics in epoch_results.items():
+            if fold_name != trained_fold and 'roc_curve' in metrics:
+                fpr = np.array(metrics['roc_curve']['fpr'])
+                tpr = np.array(metrics['roc_curve']['tpr'])
+                auroc_val = metrics['auroc']
+
+                # Interpolate to common FPR points for averaging
+                mean_fpr = np.linspace(0, 1, 100)
+                interp_tpr = np.interp(mean_fpr, fpr, tpr)
+                interp_tpr[0] = 0.0
+
+                other_fprs.append(mean_fpr)
+                other_tprs.append(interp_tpr)
+                other_aurocs.append(auroc_val)
+
+                auroc_by_epoch[epoch_num][fold_name] = auroc_val
+
+                # Plot individual fold on subplot 2
+                axes[2].plot(fpr, tpr, alpha=0.3, color=color, lw=1)
+
+        # Plot mean of other folds
+        if other_tprs:
+            mean_tpr = np.mean(other_tprs, axis=0)
+            mean_tpr[-1] = 1.0
+            mean_auroc = np.mean(other_aurocs)
+
+            label = f"Epoch {epoch_num} (AUC={mean_auroc:.3f})"
+            if epoch_num == -1:
+                label = f"Baseline (AUC={mean_auroc:.3f})"
+
+            axes[1].plot(mean_fpr, mean_tpr, color=color, lw=2,
+                         label=label, linestyle='-' if epoch_num != -1 else ':')
+
+    # Configure subplots
+    subplot_titles = [
+        f'{trained_fold} (Trained Fold)',
+        'Mean of Other Folds',
+        'All Other Folds (Individual)',
+        'AUROC Across Epochs'
+    ]
+
+    for i in range(3):
+        axes[i].plot([0, 1], [0, 1], 'k--', alpha=0.3, label='Random (AUC=0.5)')
+        axes[i].set_xlabel('False Positive Rate')
+        axes[i].set_ylabel('True Positive Rate')
+        axes[i].set_title(subplot_titles[i])
+        axes[i].legend(loc='lower right', fontsize=8)
+        axes[i].grid(True, alpha=0.3)
+        axes[i].set_xlim([0, 1])
+        axes[i].set_ylim([0, 1])
+
+    # Plot AUROC progression across epochs (subplot 4)
+    epochs_sorted = sorted(auroc_by_epoch.keys())
+
+    # Plot trained fold AUROC progression
+    trained_aurocs = [auroc_by_epoch[e].get(trained_fold, np.nan)
+                      for e in epochs_sorted]
+    axes[3].plot(epochs_sorted, trained_aurocs, 'b--', lw=2,
+                 marker='o', label=f'{trained_fold} (trained)', markersize=8)
+
+    # Plot mean of other folds
+    other_fold_names = set()
+    for epoch_data in auroc_by_epoch.values():
+        other_fold_names.update(epoch_data.keys())
+    other_fold_names.discard(trained_fold)
+
+    if other_fold_names:
+        mean_other_aurocs = []
+        for e in epochs_sorted:
+            other_vals = [auroc_by_epoch[e].get(f, np.nan)
+                          for f in other_fold_names]
+            other_vals = [v for v in other_vals if not np.isnan(v)]
+            mean_other_aurocs.append(np.mean(other_vals) if other_vals else np.nan)
+
+        axes[3].plot(epochs_sorted, mean_other_aurocs, 'g-', lw=2,
+                     marker='s', label='Mean of others', markersize=6)
+
+    axes[3].set_xlabel('Epoch (-1 = baseline)' if include_baseline else 'Epoch')
+    axes[3].set_ylabel('AUROC')
+    axes[3].set_title(subplot_titles[3])
+    axes[3].legend(loc='best')
+    axes[3].grid(True, alpha=0.3)
+    axes[3].set_ylim([0.5, 1.0])
+
+    # Overall title
+    title = f'ROC Curves and AUROC Analysis\n{model_name} - {split} split'
+    if include_baseline:
+        title += ' (with baseline)'
+    plt.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    # Save chart
+    suffix = "_with_baseline" if include_baseline else ""
+    chart_file = output_dir / f"auroc_analysis_{model_name}_{trained_fold}_{split}{suffix}.png"
+    plt.savefig(chart_file, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"AUROC chart saved: {chart_file}")
+
+    # Create a simple AUROC progression chart
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(epochs_sorted, trained_aurocs, 'b--', lw=3,
+             marker='o', label=f'{trained_fold} (trained)', markersize=10, alpha=0.8)
+
+    if other_fold_names and mean_other_aurocs:
+        plt.plot(epochs_sorted, mean_other_aurocs, 'g-', lw=2.5,
+                 marker='s', label='Mean of other folds', markersize=8, alpha=0.8)
+
+        # Add shaded region for std dev
+        std_other_aurocs = []
+        for e in epochs_sorted:
+            other_vals = [auroc_by_epoch[e].get(f, np.nan)
+                          for f in other_fold_names]
+            other_vals = [v for v in other_vals if not np.isnan(v)]
+            std_other_aurocs.append(np.std(other_vals) if other_vals else 0)
+
+        mean_other_aurocs = np.array(mean_other_aurocs)
+        std_other_aurocs = np.array(std_other_aurocs)
+
+        plt.fill_between(epochs_sorted,
+                         mean_other_aurocs - std_other_aurocs,
+                         mean_other_aurocs + std_other_aurocs,
+                         color='green', alpha=0.2, label='±1 std dev')
+
+    plt.axhline(y=0.5, color='gray', linestyle=':', alpha=0.5, label='Random baseline')
+
+    if include_baseline and -1 in epochs_sorted:
+        plt.axvline(x=-1, color='gray', linestyle=':', alpha=0.5)
+
+    plt.xlabel('Epoch (-1 = baseline)' if include_baseline else 'Epoch', fontsize=12)
+    plt.ylabel('AUROC', fontsize=12)
+    plt.title(f'AUROC Progression - {model_name} ({split} split)', fontsize=14, fontweight='bold')
+    plt.legend(loc='best')
+    plt.grid(True, alpha=0.3)
+    plt.ylim([0.45, 1.05])
+
+    plt.tight_layout()
+
+    simple_chart_file = output_dir / f"auroc_progression_{model_name}_{trained_fold}_{split}{suffix}.png"
+    plt.savefig(simple_chart_file, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"AUROC progression chart saved: {simple_chart_file}")
 
 def generate_simplified_performance_chart(
         all_results: Dict[str, Any],
@@ -719,7 +973,7 @@ def generate_performance_charts_with_baseline(
 
     # Collect data from results
     for epoch_key, epoch_results in all_results.items():
-        if 'skipped' in epoch_results or not isinstance(epoch_results, dict):
+        if 'skipped' in epoch_results or 'error' in epoch_results or not isinstance(epoch_results, dict) or not epoch_results:
             continue
 
         # Extract epoch number from key like "epoch_1" or "baseline"
@@ -751,7 +1005,10 @@ def generate_performance_charts_with_baseline(
     # Sort fold data by epochs
     for fold_name in fold_data:
         for metric in fold_data[fold_name]:
-            fold_data[fold_name][metric] = [fold_data[fold_name][metric][i] for i in sorted_indices]
+            try:
+                fold_data[fold_name][metric] = [fold_data[fold_name][metric][i] for i in sorted_indices]
+            except IndexError:
+                pass
 
     # Create charts for each metric
     metrics_to_plot = ['accuracy', 'f1', 'precision', 'recall']
@@ -889,6 +1146,7 @@ def generate_performance_charts_with_baseline(
 
 async def run_baseline_evaluation(
         base_path: Path,
+        folder: str,
         fold_name: str,
         model_name: str,
         eval_folds: List,
@@ -909,7 +1167,7 @@ async def run_baseline_evaluation(
     Returns:
         Dictionary with baseline evaluation results
     """
-    from together_training.epoch.epoch_eval import (
+    from epoch_eval import (
         load_jsonl_samples,
         prepare_eval_sample,
         load_baseline_results,
@@ -923,7 +1181,7 @@ async def run_baseline_evaluation(
     # Check for cached results first (unless forced to recompute)
     if not force_recompute:
         print("Checking for cached baseline results...")
-        cached_results = load_baseline_results(base_path, fold_name, model_name)
+        cached_results = load_baseline_results(base_path, folder, fold_name, model_name)
         if cached_results is not None:
             print("✓ Found cached baseline results, skipping computation")
             return cached_results
@@ -995,7 +1253,7 @@ async def run_baseline_evaluation(
         successful_results = {k: v for k, v in baseline_results.items() if 'error' not in v}
         if successful_results:
             print(f"\n💾 Caching baseline results for future use...")
-            save_baseline_results(baseline_results, base_path, fold_name, model_name)
+            save_baseline_results(baseline_results, base_path, folder, fold_name, model_name)
 
     return baseline_results
 
@@ -1012,16 +1270,22 @@ async def main():
         help="Base directory path (e.g., /Users/jackhopkins/PycharmProjects/lie-detector)"
     )
     parser.add_argument(
+        "--folder",
+        type=str,
+        default=".together-120b",
+        help="Base directory path (e.g., /Users/jackhopkins/PycharmProjects/lie-detector)"
+    )
+    parser.add_argument(
         "--fold-name",
         type=str,
-        default="mask-factual",
+        default="sandbagging_other",
         #default="games",
         help="Training fold name (e.g., sandbagging_ascii)"
     )
     parser.add_argument(
         "--model-name",
         type=str,
-        default="gpt_oss_120b",
+        default="openai/gpt_oss_120b",
         help="Model name (e.g., gpt_oss_120b)"
     )
     parser.add_argument(
@@ -1037,7 +1301,7 @@ async def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=32,
+        default=64,
         help="Limit number of samples per evaluation (for testing)"
     )
     parser.add_argument(
@@ -1098,8 +1362,9 @@ async def main():
     )
 
     args = parser.parse_args()
-    args.baseline = True
-    args.render_only = False#'/Users/jackhopkins/PycharmProjects/lie-detector/eval_results_20-9-2025/lie_detection_mask-factual_gpt_oss_120b_train.json'
+    #args.baseline = False
+    #args.baseline_only = True
+    args.render_only = None#'/Users/jackhopkins/PycharmProjects/lie-detector/eval_results/sandbagging_other/lie_detection_sandbagging_other_gpt_oss_120b_train.json'
     args.force_recompute = None # "epoch_4"
     # Import run state manager and cache manager
     from run_state_manager import RunStateManager
@@ -1137,6 +1402,8 @@ async def main():
             if summary['failed_epochs'] > 0:
                 print(f"  Failed epochs: {summary['failed_epochs']}")
         return
+
+
     if args.render_only:
         print(f"\n{'=' * 60}")
         print(f"RENDER-ONLY MODE")
@@ -1177,6 +1444,21 @@ async def main():
             import traceback
             traceback.print_exc()
 
+        try:
+            print("\nGenerating AUROC charts...")
+            generate_auroc_charts(
+                all_results=all_results,
+                trained_fold=args.fold_name,
+                output_dir=output_dir,
+                split=split,
+                model_name=args.model_name,
+                include_baseline=include_baseline
+            )
+        except Exception as e:
+            print(f"Warning: AUROC chart generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+
         # Generate simplified charts (trained vs mean of others)
         try:
             print("\nGenerating simplified performance charts...")
@@ -1198,11 +1480,11 @@ async def main():
         return  # Exit early, skip all evaluation logic
 
     # Import helper functions from the main module
-    from together_training.epoch.epoch_eval import (
+    from epoch_eval import (
         find_trained_models,
         find_eval_folds
     )
-    from together_training.epoch.endpoint_manager import EndpointManager
+    from endpoint_manager import EndpointManager
 
     base_path = Path(args.base_path)
 
@@ -1212,7 +1494,7 @@ async def main():
     print(f"{'=' * 60}")
 
     try:
-        eval_folds = find_eval_folds(base_path, args.model_name)
+        eval_folds = find_eval_folds(base_path, args.folder, args.model_name)
         print(f"Found {len(eval_folds)} evaluation folds:")
         for fold in eval_folds:
             print(f"  - {fold.name}")
@@ -1231,6 +1513,7 @@ async def main():
     if include_baseline:
         baseline_results = await run_baseline_evaluation(
             base_path=base_path,
+            folder=args.folder,
             fold_name=args.fold_name,
             model_name=args.model_name,
             eval_folds=eval_folds,
@@ -1249,7 +1532,7 @@ async def main():
         print(f"Model: {args.model_name}")
 
         try:
-            trained_models = find_trained_models(base_path, args.fold_name, args.model_name)
+            trained_models = find_trained_models(base_path, args.folder, args.fold_name, args.model_name)
             print(f"Found {len(trained_models)} completed models:")
             for model in trained_models:
                 print(f"  - Epoch {model.epoch}: {model.model_id}")
@@ -1286,7 +1569,7 @@ async def main():
                 print("Endpoint manager initialized")
                 
                 # Define training fold path
-                training_fold_path = base_path / ".together-120b" / "openai" / args.model_name / args.fold_name
+                training_fold_path = base_path / args.folder / args.model_name / args.fold_name
                 
                 # Batch deploy ALL endpoints for this fold with 2-hour timeout
                 print(f"\n🚀 BATCH DEPLOYING ALL ENDPOINTS FOR {args.fold_name}")
@@ -1318,7 +1601,7 @@ async def main():
             if args.limit:
                 print(f"Limiting to {args.limit} samples per evaluation")
 
-            training_fold_path = base_path / ".together-120b" / "openai" / args.model_name / args.fold_name
+            training_fold_path = base_path / args.folder / args.model_name / args.fold_name
 
             for model_info in trained_models:
                 print(f"\n--- Model Epoch {model_info.epoch} ---")
@@ -1452,13 +1735,16 @@ async def main():
 
         for fold_name, metrics in epoch_results.items():
             if 'error' not in metrics:
-                print(f"  {fold_name:25} - F1: {metrics['f1']:.3f}, Acc: {metrics['accuracy']:.3f}, "
-                      f"Prec: {metrics['precision']:.3f}, Rec: {metrics['recall']:.3f}")
+                try:
+                    print(f"  {fold_name:25} - F1: {metrics['f1']:.3f}, Acc: {metrics['accuracy']:.3f}, "
+                          f"Prec: {metrics['precision']:.3f}, Rec: {metrics['recall']:.3f}")
 
-                avg_metrics['accuracy'].append(metrics['accuracy'])
-                avg_metrics['f1'].append(metrics['f1'])
-                avg_metrics['precision'].append(metrics['precision'])
-                avg_metrics['recall'].append(metrics['recall'])
+                    avg_metrics['accuracy'].append(metrics['accuracy'])
+                    avg_metrics['f1'].append(metrics['f1'])
+                    avg_metrics['precision'].append(metrics['precision'])
+                    avg_metrics['recall'].append(metrics['recall'])
+                except Exception as e:
+                    pass
             else:
                 print(f"  {fold_name:25} - Error: {metrics['error'][:50]}...")
 
@@ -1475,6 +1761,21 @@ async def main():
         print(f"\n{'=' * 60}")
         print(f"GENERATING CHARTS")
         print(f"{'=' * 60}")
+
+        try:
+            print("\nGenerating AUROC charts...")
+            generate_auroc_charts(
+                all_results=all_results,
+                trained_fold=args.fold_name,
+                output_dir=output_dir,
+                split=split,
+                model_name=args.model_name,
+                include_baseline=include_baseline
+            )
+        except Exception as e:
+            print(f"Warning: AUROC chart generation failed: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Generate full charts with all folds
         try:
